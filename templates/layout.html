@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>HPGPT</title>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles.css') }}">
+    <style>
+        body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif; background: #f4f6fb; }
+        .container { display: flex; min-height: 100vh; }
+
+        /* ── Sidebar ── */
+        .sidebar {
+            width: 300px; background: #00205b; color: #fff;
+            display: flex; flex-direction: column; align-items: stretch;
+            box-shadow: 2px 0 16px rgba(0,32,91,0.09); flex-shrink: 0;
+        }
+        .sidebar-header {
+            display: flex; flex-direction: row; align-items: center;
+            justify-content: center; padding: 32px 0 16px 0;
+            background: #00205b; gap: 16px;
+        }
+        .sidebar-header img { width: 52px; height: 52px; border-radius: 12px; }
+        .app-title { margin: 0; font-size: 2em; font-weight: bold; letter-spacing: 2px; color: #e4002b; }
+        .sidebar-divider { width: 80%; height: 4px; background: #e4002b; margin: 0 auto; border: none; border-radius: 2px; }
+        .sidebar-welcome {
+            margin: 28px 20px 0 20px; padding: 16px 14px;
+            background: rgba(255,255,255,0.07); border-radius: 10px;
+            color: #e4002b; font-size: 1em; font-weight: 600; text-align: center; line-height: 1.6;
+        }
+
+        /* ── File list in sidebar ── */
+        .sidebar-files { margin: 20px 20px 0 20px; display: flex; flex-direction: column; gap: 0; }
+        .sidebar-files-title {
+            color: rgba(255,255,255,0.5); font-size: 0.75em;
+            font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px;
+        }
+        .sidebar-file-item {
+            display: flex; align-items: center; justify-content: space-between;
+            background: rgba(255,255,255,0.07); border-radius: 8px;
+            padding: 8px 10px; margin-bottom: 6px; gap: 8px;
+        }
+        .sidebar-file-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .sidebar-file-icon { font-size: 1.1em; flex-shrink: 0; }
+        .sidebar-file-name {
+            font-size: 0.82em; color: #fff; font-weight: 500;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px;
+        }
+        .sidebar-file-remove {
+            background: none; border: none; color: #e4002b;
+            font-size: 1.2em; font-weight: bold; cursor: pointer;
+            padding: 0 3px; line-height: 1; flex-shrink: 0;
+            border-radius: 4px; transition: background 0.15s;
+        }
+        .sidebar-file-remove:hover { background: rgba(228,0,43,0.2); }
+        .sidebar-file-count { color: rgba(255,255,255,0.4); font-size: 0.78em; margin-top: 4px; text-align: right; }
+
+        /* ── Main content ── */
+        .main-content {
+            flex: 1; background: #fff; border-radius: 0 20px 20px 0;
+            margin: 50px 32px 50px 0; display: flex; flex-direction: column;
+            box-shadow: 0 8px 36px rgba(0,32,91,0.09);
+            position: relative; overflow: hidden; min-width: 0;
+        }
+        .hp-watermark {
+            position: absolute; top: 50%; left: 50%;
+            width: 380px; height: 380px; opacity: 0.07;
+            transform: translate(-50%, -50%); pointer-events: none; z-index: 0;
+        }
+        .main-header, .output-section, .main-content form.input-form { position: relative; z-index: 1; }
+        .main-header {
+            padding: 12px 24px 8px 24px; border-bottom: 1.5px solid #e0e0e0;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .main-header h2 { margin: 0; font-size: 1.4em; color: #00205b; font-weight: 800; letter-spacing: 2px; }
+        .output-section { padding: 0 24px; flex: 1; overflow-y: auto; }
+        .message.bot .message-content {
+            background: #f7f8fc; border-radius: 10px;
+            padding: 12px 16px; margin-top: 16px; font-size: 1em; color: #222; line-height: 1.6;
+        }
+        .generated-document { margin-top: 12px; margin-bottom: 8px; }
+        .download-link {
+            display: inline-flex; align-items: center; gap: 6px;
+            margin-top: 8px; padding: 10px 20px;
+            background: #00205b; color: #fff; border-radius: 8px;
+            text-decoration: none; font-weight: 700; font-size: 0.95em;
+            transition: background 0.2s; box-shadow: 0 2px 8px rgba(0,32,91,0.12);
+        }
+        .download-link:hover { background: #e4002b; }
+
+        /* ── Input form ── */
+        .main-content form.input-form {
+            padding: 12px 24px 20px 24px;
+            display: flex; flex-direction: column; gap: 10px;
+            border-top: 1.5px solid #f0f0f0;
+        }
+        .input-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; }
+        #message-input {
+            flex: 1 1 280px; padding: 9px 12px; border-radius: 8px;
+            border: 2px solid #b3d1fa; font-size: 0.95em;
+            background: #fff; transition: border 0.2s; min-width: 0;
+        }
+        #message-input:focus { border: 2px solid #00205b; outline: none; }
+
+        /* Hidden file input */
+        #attach-file {
+            position: absolute; width: 1px; height: 1px;
+            opacity: 0; pointer-events: none; overflow: hidden;
+        }
+        .attach-label {
+            background: #00205b; color: #fff; padding: 8px 14px;
+            border-radius: 8px; font-weight: 600; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 5px;
+            font-size: 0.88em; transition: background 0.2s; white-space: nowrap;
+            border: none; user-select: none;
+        }
+        .attach-label:hover { background: #e4002b; }
+        .file-badge {
+            background: #e4002b; color: #fff; border-radius: 10px;
+            padding: 1px 7px; font-size: 0.8em; font-weight: 700;
+        }
+        .doc-type-label { font-weight: 600; color: #00205b; font-size: 0.88em; white-space: nowrap; }
+        .doc-type-select {
+            width: 110px; padding: 7px 8px; border-radius: 8px;
+            border: 2px solid #00205b; font-size: 0.88em; background: #f7f7f7; color: #222;
+        }
+        .doc-type-select:focus { border: 2px solid #e4002b; outline: none; }
+        .generate-btn {
+            background: #e4002b; color: #fff; padding: 8px 18px;
+            border: none; border-radius: 8px; font-weight: 700;
+            cursor: pointer; font-size: 0.88em; white-space: nowrap;
+            transition: background 0.2s; box-shadow: 0 2px 6px rgba(228,0,43,0.15);
+        }
+        .generate-btn:hover { background: #00205b; }
+        .generate-btn:disabled { background: #aaa; cursor: not-allowed; }
+
+        /* ── Loading overlay ── */
+        .loading-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,32,91,0.6); z-index: 9999;
+            flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+        }
+        .loading-overlay.active { display: flex; }
+        .loading-spinner {
+            width: 56px; height: 56px;
+            border: 6px solid rgba(255,255,255,0.25);
+            border-top-color: #e4002b; border-radius: 50%;
+            animation: spin 0.85s linear infinite;
+        }
+        .loading-text { color: #fff; font-size: 1.1em; font-weight: 600; letter-spacing: 0.5px; }
+        .loading-sub  { color: rgba(255,255,255,0.6); font-size: 0.85em; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .flash { padding: 10px 16px; border-radius: 8px; margin: 12px 24px 0; font-size: 0.9em; }
+        .flash.danger { background: #ffeaea; color: #c00; border: 1px solid #f5c6cb; }
+
+        @media (max-width: 900px) {
+            .container { flex-direction: column; }
+            .sidebar { width: 100%; }
+            .main-content { margin: 0; border-radius: 0; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Loading overlay -->
+<div class="loading-overlay" id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Generating your document…</div>
+    <div class="loading-sub">This may take a minute for multiple files</div>
+</div>
+
+<div class="container">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <img src="{{ url_for('static', filename='hp_logo.png') }}" alt="HP Logo">
+            <span class="app-title">HPGPT</span>
+        </div>
+        <div class="sidebar-divider"></div>
+        <div class="sidebar-welcome">
+            Enter a prompt, attach one or more documents
+            (txt, pdf, csv, xlsx, docx), and select the output type.<br><br>
+            Upload <strong>multiple files</strong> to generate a
+            <strong>combined report</strong>.
+        </div>
+
+        <!-- Attached files list -->
+        <div class="sidebar-files" id="sidebar-files" style="display:none;">
+            <div class="sidebar-files-title">Attached Files</div>
+            <div id="file-list"></div>
+            <div class="sidebar-file-count" id="file-count"></div>
+        </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+        <img src="{{ url_for('static', filename='hp_logo_watermark.jpg') }}"
+             alt="HP Watermark" class="hp-watermark">
+
+        <header class="main-header">
+            <h2>Document Generator</h2>
+        </header>
+
+        <section class="output-section">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endwith %}
+
+            <div class="message bot">
+                <div class="message-content">
+                    {% if generated_content %}
+                        {{ generated_content|safe }}
+                    {% else %}
+                        No document generated yet. Enter a prompt and attach your files to get started.
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if download_url %}
+            <div class="generated-document">
+                <a class="download-link" href="{{ download_url }}">⬇ Download Output Document</a>
+            </div>
+            {% endif %}
+        </section>
+
+        <!-- Input form -->
+        <form class="input-form" enctype="multipart/form-data"
+              method="post" action="{{ url_for('generate') }}" id="main-form">
+
+            <!-- File input outside label, hidden via position not display:none -->
+            <input
+                id="attach-file"
+                name="document"
+                type="file"
+                accept=".txt,.pdf,.csv,.xlsx,.docx"
+                multiple
+            >
+
+            <div class="input-row">
+                <input
+                    id="message-input"
+                    type="text"
+                    name="prompt"
+                    placeholder="Type your prompt here..."
+                    autocomplete="off"
+                    required
+                >
+                <label for="attach-file" class="attach-label" id="attach-label">
+                    📎 Attach Files
+                </label>
+                <label for="doc-type" class="doc-type-label">Type:</label>
+                <select id="doc-type" name="doc_type" class="doc-type-select" required>
+                    <option value="docx">DOCX</option>
+                    <option value="pdf">PDF</option>
+                    <option value="pptx">PPT</option>
+                </select>
+                <button type="submit" class="generate-btn" id="gen-btn">Generate</button>
+            </div>
+        </form>
+    </main>
+</div>
+
+<script>
+    const fileInput    = document.getElementById('attach-file');
+    const attachLabel  = document.getElementById('attach-label');
+    const form         = document.getElementById('main-form');
+    const overlay      = document.getElementById('loading-overlay');
+    const sidebarFiles = document.getElementById('sidebar-files');
+    const fileList     = document.getElementById('file-list');
+    const fileCount    = document.getElementById('file-count');
+
+    // Accumulates files across multiple picker sessions
+    let dt = new DataTransfer();
+
+    const ICONS = { pdf: '📄', csv: '📊', xlsx: '📊', xls: '📊', docx: '📝', txt: '📝' };
+
+    function getIcon(name) {
+        const ext = name.split('.').pop().toLowerCase();
+        return ICONS[ext] || '📁';
+    }
+
+    function renderSidebar() {
+        fileList.innerHTML = '';
+        const files = dt.files;
+
+        if (!files || files.length === 0) {
+            sidebarFiles.style.display = 'none';
+            attachLabel.innerHTML = '📎 Attach Files';
+            return;
+        }
+
+        sidebarFiles.style.display = 'block';
+        attachLabel.innerHTML =
+            '📎 Attach Files <span class="file-badge">' + files.length + '</span>';
+
+        Array.from(files).forEach(function(file) {
+            const item = document.createElement('div');
+            item.className = 'sidebar-file-item';
+            item.innerHTML =
+                '<div class="sidebar-file-info">' +
+                '  <span class="sidebar-file-icon">' + getIcon(file.name) + '</span>' +
+                '  <span class="sidebar-file-name" title="' + file.name + '">' + file.name + '</span>' +
+                '</div>' +
+                '<button type="button" class="sidebar-file-remove" ' +
+                '  onclick="removeFile(\'' + file.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" ' +
+                '  title="Remove">×</button>';
+            fileList.appendChild(item);
+        });
+
+        const n = files.length;
+        fileCount.textContent = n + ' file' + (n > 1 ? 's' : '') + ' attached';
+    }
+
+    function removeFile(name) {
+        const newDt = new DataTransfer();
+        Array.from(dt.files).forEach(function(f) {
+            if (f.name !== name) newDt.items.add(f);
+        });
+        dt = newDt;
+        fileInput.files = dt.files;
+        renderSidebar();
+    }
+
+    // Add newly picked files to accumulated list
+    fileInput.addEventListener('change', function() {
+        Array.from(fileInput.files).forEach(function(file) {
+            const exists = Array.from(dt.files).some(function(f) { return f.name === file.name; });
+            if (!exists) dt.items.add(file);
+        });
+        fileInput.files = dt.files;
+        renderSidebar();
+    });
+
+    // Show loading on submit
+    form.addEventListener('submit', function() {
+        overlay.classList.add('active');
+        document.getElementById('gen-btn').disabled = true;
+    });
+</script>
+</body>
+</html>
