@@ -1,325 +1,786 @@
-import pandas as pd
-import json
+"""
+data_fusion_agent.py  -  HPGPT Cross-File Intelligence Layer
+=============================================================
+Improvements implemented
+------------------------
+1.  Reuses entities already extracted by data_agent -- no duplicate processing.
+2.  Entity synonym handling: dept/division/business unit/function -> "department".
+3.  Confidence-scored relationship discovery -- weak links filtered out.
+4.  Cross-file correlation: numerical bridging across semantic links.
+5.  Insight prioritisation: Critical / High / Medium / Low labels.
+6.  File relevance scoring: ranks files against the user prompt.
+7.  Full integration surface for agent_orchestrator.py.
+ 
+Public API
+----------
+    from data_fusion_agent import DataFusionAgent
+ 
+    agent  = DataFusionAgent(file_data, user_prompt)
+    result = agent.run()
+ 
+    result.cross_file_context  -> str  (prepended to LLM prompt)
+    result.ranked_files        -> list[str]  (most-relevant first)
+    result.links               -> list[LinkRecord]
+    result.insights            -> list[InsightRecord]
+    result.summary_log         -> str  (human-readable debug summary)
+"""
+ 
+from __future__ import annotations
+ 
+import logging
 import re
-import requests
+from collections import defaultdict
+from dataclasses import dataclass, field
 from itertools import combinations
-from pathlib import Path
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama3-70b-8192"
-
-def call_llm(prompt: str, api_key: str) -> str:
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    body = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": 1500
-    }
-    resp = requests.post(GROQ_API_URL, headers=headers, json=body)
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
-
-
-def load_file(path: str) -> pd.DataFrame | str:
+from typing import Any
+ 
+import pandas as pd
+ 
+logger = logging.getLogger(__name__)
+ 
+ 
+# ==============================================================================
+# 1.  SYNONYM TABLE  -  maps raw column fragments -> canonical entity name
+# ==============================================================================
+ 
+_SYNONYMS: dict[str, list[str]] = {
+    "department":   ["department", "dept", "division", "business unit",
+                     "function", "vertical", "bu", "biz unit"],
+    "region":       ["region", "zone", "area", "geography", "territory",
+                     "cluster", "circle"],
+    "location":     ["location", "city", "state", "branch", "office",
+                     "plant", "site", "depot", "terminal", "hub"],
+    "product":      ["product", "item", "sku", "material", "commodity",
+                     "fuel", "grade", "offering", "service"],
+    "employee":     ["employee", "emp", "staff", "worker", "personnel",
+                     "headcount", "associate", "executive"],
+    "vendor":       ["vendor", "supplier", "contractor", "agency",
+                     "partner", "subcontractor"],
+    "customer":     ["customer", "client", "account", "buyer",
+                     "consumer", "dealer", "distributor"],
+    "category":     ["category", "type", "class", "segment", "group",
+                     "tier", "classification"],
+    "project":      ["project", "initiative", "program", "scheme",
+                     "work order", "assignment"],
+    "period":       ["month", "quarter", "year", "period", "fy",
+                     "date", "week", "fiscal", "timeline"],
+    "cost_center":  ["cost center", "cost centre", "profit center",
+                     "cost code", "gl code"],
+    "asset":        ["asset", "equipment", "machine", "facility",
+                     "tank", "vehicle", "infrastructure"],
+    "team":         ["team", "unit", "squad", "group", "cluster",
+                     "pod", "crew"],
+    "role":         ["role", "designation", "title", "position",
+                     "grade", "level", "band"],
+}
+ 
+# Reverse lookup: keyword fragment -> canonical name
+_KW_TO_ENTITY: dict[str, str] = {
+    kw: entity
+    for entity, kws in _SYNONYMS.items()
+    for kw in kws
+}
+ 
+ 
+def canonical_entity(col_name: str) -> str | None:
     """
-    Load any supported file into a DataFrame or raw text.
-    Supports: CSV, Excel (.xlsx/.xls), JSON, TSV, plain text.
-    Returns a DataFrame for structured files, raw string for unstructured.
+    Map a raw column name to its canonical entity type using synonym table.
+    Returns None if no match found.
     """
-    ext = Path(path).suffix.lower()
-    try:
-        if ext == ".csv":
-            return pd.read_csv(path)
-        elif ext in (".xlsx", ".xls"):
-            return pd.read_excel(path)
-        elif ext == ".json":
-            with open(path) as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                return pd.DataFrame(data)
-            elif isinstance(data, dict):
-                # Try to find a list value inside the dict
-                for v in data.values():
-                    if isinstance(v, list):
-                        return pd.DataFrame(v)
-            return pd.DataFrame([data])
-        elif ext == ".tsv":
-            return pd.read_csv(path, sep="\t")
-        elif ext in (".txt", ".md", ".log"):
-            with open(path) as f:
-                return f.read()  # raw text, handled separately
+    cl = col_name.lower().strip()
+    # Longest-match first to avoid "group" matching before "cost_center"
+    for kw in sorted(_KW_TO_ENTITY, key=len, reverse=True):
+        if kw in cl:
+            return _KW_TO_ENTITY[kw]
+    return None
+ 
+ 
+# ==============================================================================
+# 2.  DATA STRUCTURES
+# ==============================================================================
+ 
+@dataclass
+class LinkRecord:
+    file_a:        str
+    col_a:         str
+    file_b:        str
+    col_b:         str
+    entity_type:   str
+    shared_values: list[str]
+    confidence:    float          # 0.0 - 1.0
+    value_overlap: float          # fraction of values shared
+ 
+ 
+@dataclass
+class InsightRecord:
+    title:       str
+    detail:      str
+    priority:    str              # "Critical" | "High" | "Medium" | "Low"
+    files:       list[str]
+    entity_type: str
+    score:       float            # raw priority score
+ 
+ 
+# ==============================================================================
+# 3.  FILE RELEVANCE SCORING
+# ==============================================================================
+ 
+_RELEVANCE_SIGNALS: dict[str, list[str]] = {
+    "financial":   ["revenue", "profit", "cost", "expense", "budget",
+                    "p&l", "finance", "margin", "loss", "turnover"],
+    "hr":          ["employee", "headcount", "attrition", "salary",
+                    "recruitment", "training", "hr", "workforce"],
+    "sales":       ["sales", "target", "achievement", "volume",
+                    "customer", "dealer", "order", "pipeline"],
+    "operations":  ["inventory", "stock", "dispatch", "receipt",
+                    "production", "capacity", "throughput", "plant"],
+    "performance": ["kpi", "performance", "target", "actual",
+                    "variance", "score", "rating", "benchmark"],
+    "risk":        ["risk", "compliance", "audit", "incident",
+                    "safety", "non-compliance", "violation"],
+}
+ 
+ 
+def score_file_relevance(file_data: dict, user_prompt: str) -> list[tuple[str, float]]:
+    """
+    Score each file 0-1 against the user prompt.
+    Returns list of (filename, score) sorted descending.
+    """
+    prompt_lower = user_prompt.lower()
+ 
+    # Identify which domains the prompt touches
+    prompt_domains: set[str] = set()
+    for domain, kws in _RELEVANCE_SIGNALS.items():
+        if any(kw in prompt_lower for kw in kws):
+            prompt_domains.add(domain)
+ 
+    scores: dict[str, float] = {}
+ 
+    for fname, data in file_data.items():
+        # Gather all column text + file name
+        cols: list[str] = []
+        if data.get("type") == "multi_sheet":
+            for s in data.get("sheets", {}).values():
+                cols.extend(s.get("columns", []))
         else:
-            # Attempt CSV as fallback
-            return pd.read_csv(path)
-    except Exception as e:
-        return f"[ERROR loading {path}: {e}]"
-
-
-def get_schema_summary(label: str, data, api_key: str) -> dict:
+            cols = data.get("columns", [])
+ 
+        col_text = " ".join(cols).lower() + " " + fname.lower()
+ 
+        file_score = 0.0
+ 
+        # If prompt has domain signals, score by domain overlap
+        if prompt_domains:
+            for domain in prompt_domains:
+                kws = _RELEVANCE_SIGNALS[domain]
+                hits = sum(1 for kw in kws if kw in col_text)
+                if hits:
+                    file_score += hits * 0.15
+ 
+        # Direct keyword match between prompt words and column names
+        prompt_words = set(re.findall(r'\b\w{4,}\b', prompt_lower))
+        col_words    = set(re.findall(r'\b\w{4,}\b', col_text))
+        direct_hits  = len(prompt_words & col_words)
+        file_score  += direct_hits * 0.1
+ 
+        # Intent bonus: analytical files score higher for report prompts
+        intent = data.get("intent", "informational")
+        if "report" in prompt_lower or "analysis" in prompt_lower:
+            if intent == "analytical":
+                file_score += 0.2
+ 
+        scores[fname] = round(min(file_score, 1.0), 3)
+ 
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    logger.info(f"[DataFusion] File relevance: {ranked}")
+    return ranked
+ 
+ 
+# ==============================================================================
+# 4.  ENTITY MAP BUILDER  -  reuses data_agent extracted entities
+# ==============================================================================
+ 
+def _build_entity_map(file_data: dict) -> dict[str, dict[str, dict]]:
     """
-    Use LLM to understand what this file/data is about
-    and what each column semantically represents.
-    Returns a schema dict: {column_name: semantic_meaning}
+    Reuse entities already extracted by data_agent._summarize_df().
+    Falls back to column-name scanning if entity key absent.
+ 
+    Returns:
+        {filename: {entity_type: {columns: [...], sample_values: [...]}}}
     """
-    if isinstance(data, pd.DataFrame):
-        headers = list(data.columns)
-        sample = data.head(5).to_string(index=False)
-        prompt = f"""You are a data analyst. Below is a dataset labeled '{label}'.
-
-Columns: {headers}
-Sample rows:
-{sample}
-
-Task:
-1. In one sentence, describe what this dataset is about.
-2. For each column, provide its semantic meaning (what real-world concept it represents).
-
-Respond ONLY in this JSON format:
-{{
-  "description": "...",
-  "columns": {{
-    "column_name": "semantic meaning",
-    ...
-  }}
-}}"""
-    else:
-        # Unstructured text file
-        preview = str(data)[:1000]
-        prompt = f"""You are a data analyst. Below is a text file labeled '{label}'.
-
-Content preview:
-{preview}
-
-Task:
-1. In one sentence, describe what this file is about.
-2. List the key entities or topics mentioned (e.g., department names, employee IDs, product names).
-
-Respond ONLY in this JSON format:
-{{
-  "description": "...",
-  "columns": {{
-    "entity_type": "description of key entities found"
-  }}
-}}"""
-
-    raw = call_llm(prompt, api_key)
-    try:
-        raw_clean = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw_clean)
-    except Exception:
-        return {"description": raw, "columns": {}}
-
-
-def find_semantic_links(schemas: dict, api_key: str) -> list[dict]:
+    result: dict[str, dict] = {}
+ 
+    for fname, data in file_data.items():
+        # -- Try reusing data_agent entities first -------------------------
+        if data.get("type") == "multi_sheet":
+            # Multi-sheet: aggregate from cross_sheet_entities if present,
+            # else merge per-sheet entity dicts
+            if "entities" in data:
+                result[fname] = data["entities"]
+                continue
+            merged: dict[str, dict] = {}
+            for sdata in data.get("sheets", {}).values():
+                for etype, info in sdata.get("entities", {}).items():
+                    if etype not in merged:
+                        merged[etype] = {"columns": [], "sample_values": []}
+                    for col in info.get("columns", []):
+                        if col not in merged[etype]["columns"]:
+                            merged[etype]["columns"].append(col)
+                    existing = set(merged[etype]["sample_values"])
+                    merged[etype]["sample_values"] = list(
+                        existing | set(info.get("sample_values", []))
+                    )[:20]
+            result[fname] = merged
+            continue
+ 
+        # Single-frame tabular or text
+        if "entities" in data and data["entities"]:
+            result[fname] = data["entities"]
+            continue
+ 
+        # -- Fallback: scan columns ourselves -----------------------------
+        entities: dict[str, dict] = {}
+        for col in data.get("columns", []):
+            etype = canonical_entity(col)
+            if etype is None:
+                continue
+            if etype not in entities:
+                entities[etype] = {"columns": [], "sample_values": []}
+            if col not in entities[etype]["columns"]:
+                entities[etype]["columns"].append(col)
+            # Pull values from sample rows
+            for row in data.get("sample", []):
+                v = str(row.get(col, "")).strip()
+                if v and v not in ("nan", "None", ""):
+                    if v not in entities[etype]["sample_values"]:
+                        entities[etype]["sample_values"].append(v)
+            entities[etype]["sample_values"] = entities[etype]["sample_values"][:20]
+ 
+        result[fname] = entities
+ 
+    return result
+ 
+ 
+# ==============================================================================
+# 5.  LINK DISCOVERY WITH CONFIDENCE SCORING
+# ==============================================================================
+ 
+_MIN_LINK_CONFIDENCE = 0.35   # links below this are discarded
+ 
+ 
+def _discover_links(entity_map: dict[str, dict]) -> list[LinkRecord]:
     """
-    Given schemas of all files, ask LLM to find which columns
-    across files represent the same real-world entity.
-    Returns list of links: [{file_a, col_a, file_b, col_b, entity}]
+    Find cross-file links with confidence scores.
+ 
+    Confidence formula:
+        base          = 0.5   (same canonical entity type found in both files)
+        value_overlap += 0.4  (fraction of shared distinct values, capped at 0.4)
+        col_name_sim  += 0.1  (if raw column names are similar, not just same type)
     """
-    schema_text = ""
-    for label, schema in schemas.items():
-        schema_text += f"\nFile '{label}': {schema['description']}\n"
-        for col, meaning in schema.get("columns", {}).items():
-            schema_text += f"  - {col}: {meaning}\n"
-
-    prompt = f"""You are a data integration expert. Below are schemas of multiple uploaded files:
-
-{schema_text}
-
-Task:
-Identify ALL pairs of columns across different files that represent the same real-world entity or concept (e.g., both refer to 'Department', 'Employee ID', 'Product Code', 'Region', 'Date', etc.).
-
-These are the columns that can be used to JOIN or CORRELATE data across files.
-
-Respond ONLY in this JSON format:
-{{
-  "links": [
-    {{
-      "file_a": "label of first file",
-      "col_a": "column name in file_a",
-      "file_b": "label of second file", 
-      "col_b": "column name in file_b",
-      "entity": "what real-world concept this represents"
-    }}
-  ],
-  "reasoning": "brief explanation of why these links make sense"
-}}
-
-If no meaningful links exist, return {{"links": [], "reasoning": "..."}}"""
-
-    raw = call_llm(prompt, api_key)
-    try:
-        raw_clean = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw_clean)
-    except Exception:
-        return {"links": [], "reasoning": raw}
-
-
-def fuse_on_links(dataframes: dict, links: list) -> list[dict]:
+    links: list[LinkRecord] = []
+ 
+    for fa, fb in combinations(entity_map.keys(), 2):
+        ents_a = entity_map[fa]
+        ents_b = entity_map[fb]
+        shared_types = set(ents_a.keys()) & set(ents_b.keys())
+ 
+        for etype in shared_types:
+            info_a = ents_a[etype]
+            info_b = ents_b[etype]
+ 
+            vals_a = set(v.lower() for v in info_a.get("sample_values", []))
+            vals_b = set(v.lower() for v in info_b.get("sample_values", []))
+ 
+            union      = vals_a | vals_b
+            intersect  = vals_a & vals_b
+            overlap    = len(intersect) / len(union) if union else 0.0
+ 
+            # Period columns don't need value overlap (date ranges may differ)
+            if etype == "period":
+                overlap = 0.5
+ 
+            confidence = 0.5 + (overlap * 0.4)
+ 
+            # Small bonus if raw column names are similar
+            col_a = info_a["columns"][0] if info_a["columns"] else ""
+            col_b = info_b["columns"][0] if info_b["columns"] else ""
+            if col_a.lower() == col_b.lower():
+                confidence += 0.1
+            confidence = round(min(confidence, 1.0), 3)
+ 
+            if confidence < _MIN_LINK_CONFIDENCE:
+                logger.debug(
+                    f"[DataFusion] Discarded low-confidence link "
+                    f"{fa}.{col_a}  {fb}.{col_b} "
+                    f"entity={etype} confidence={confidence}"
+                )
+                continue
+ 
+            links.append(LinkRecord(
+                file_a        = fa,
+                col_a         = col_a,
+                file_b        = fb,
+                col_b         = col_b,
+                entity_type   = etype,
+                shared_values = sorted(intersect)[:10],
+                confidence    = confidence,
+                value_overlap = round(overlap, 3),
+            ))
+            logger.info(
+                f"[DataFusion] Link: {fa}.{col_a}  {fb}.{col_b} "
+                f"entity={etype} confidence={confidence} overlap={overlap:.2f}"
+            )
+ 
+    # Sort by confidence descending
+    links.sort(key=lambda l: l.confidence, reverse=True)
+    return links
+ 
+ 
+# ==============================================================================
+# 6.  NUMERIC FUSION  -  cross-file aggregates per shared entity value
+# ==============================================================================
+ 
+def _fuse_numerics(
+    file_data: dict,
+    links: list[LinkRecord]
+) -> list[dict]:
     """
-    Merge DataFrames based on LLM-discovered semantic links.
-    Returns list of per-entity insight dicts.
+    For each high-confidence link, merge sample DataFrames and compute
+    per-entity-value aggregates.  Returns list of fused records.
     """
-    insights = []
-
+    def _to_df(data: dict) -> pd.DataFrame:
+        if data.get("type") == "multi_sheet":
+            frames = [
+                pd.DataFrame(s.get("sample", []))
+                for s in data.get("sheets", {}).values()
+                if s.get("sample")
+            ]
+            return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        rows = data.get("sample", [])
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+ 
+    fused: list[dict] = []
+ 
     for link in links:
-        fa, ca = link["file_a"], link["col_a"]
-        fb, cb = link["file_b"], link["col_b"]
-        entity = link["entity"]
-
-        df_a = dataframes.get(fa)
-        df_b = dataframes.get(fb)
-
-        if not isinstance(df_a, pd.DataFrame) or not isinstance(df_b, pd.DataFrame):
+        if link.confidence < 0.5:
+            continue   # only fuse links with meaningful confidence
+ 
+        df_a = _to_df(file_data[link.file_a])
+        df_b = _to_df(file_data[link.file_b])
+ 
+        if df_a.empty or df_b.empty:
             continue
-        if ca not in df_a.columns or cb not in df_b.columns:
+        if link.col_a not in df_a.columns or link.col_b not in df_b.columns:
             continue
-
+ 
         try:
-            # Normalize for join
-            temp_a = df_a.copy()
-            temp_b = df_b.copy()
-            temp_a["__join_key__"] = temp_a[ca].astype(str).str.strip().str.lower()
-            temp_b["__join_key__"] = temp_b[cb].astype(str).str.strip().str.lower()
-
-            merged = pd.merge(temp_a, temp_b, on="__join_key__",
-                              suffixes=(f"_{fa}", f"_{fb}"), how="inner")
-            merged.drop(columns=["__join_key__"], inplace=True)
-
+            tmp_a = df_a.copy()
+            tmp_b = df_b.copy()
+            tmp_a["__jk__"] = tmp_a[link.col_a].astype(str).str.strip().str.lower()
+            tmp_b["__jk__"] = tmp_b[link.col_b].astype(str).str.strip().str.lower()
+ 
+            fa_tag = link.file_a.split(".")[0][:8]
+            fb_tag = link.file_b.split(".")[0][:8]
+ 
+            merged = pd.merge(
+                tmp_a, tmp_b, on="__jk__",
+                suffixes=(f"_{fa_tag}", f"_{fb_tag}"),
+                how="inner"
+            )
+            merged.drop(columns=["__jk__"], inplace=True, errors="ignore")
+ 
             if merged.empty:
                 continue
-
-            # Build per-entity-value summaries
-            join_col = f"{ca}_{fa}" if ca != cb else ca
-            group_col = join_col if join_col in merged.columns else merged.columns[0]
-
-            for val, group in merged.groupby(group_col):
-                # Aggregate numeric columns
-                numeric_summary = {}
-                for col in group.select_dtypes(include='number').columns:
-                    numeric_summary[col] = {
-                        "sum": round(group[col].sum(), 2),
-                        "mean": round(group[col].mean(), 2),
-                        "min": round(group[col].min(), 2),
-                        "max": round(group[col].max(), 2)
+ 
+            group_col = (
+                link.col_a if link.col_a in merged.columns
+                else merged.columns[0]
+            )
+ 
+            for val, grp in merged.groupby(group_col):
+                num_summary: dict[str, dict] = {}
+                for col in grp.select_dtypes(include="number").columns:
+                    s = grp[col].dropna()
+                    if s.empty or len(s) < 1:
+                        continue
+                    num_summary[col] = {
+                        "sum":  round(float(s.sum()),  2),
+                        "mean": round(float(s.mean()), 2),
+                        "min":  round(float(s.min()),  2),
+                        "max":  round(float(s.max()),  2),
                     }
-
-                insights.append({
-                    "entity": entity,
-                    "value": val,
-                    "sources": [fa, fb],
-                    "row_count": len(group),
-                    "numeric_summary": numeric_summary,
-                    "sample_rows": group.head(3).to_dict(orient="records")
-                })
-
-        except Exception as e:
-            print(f"[DataFusionAgent] Merge failed for {fa}.{ca} <-> {fb}.{cb}: {e}")
-
+ 
+                if num_summary:
+                    fused.append({
+                        "entity_type":     link.entity_type,
+                        "entity_value":    str(val),
+                        "source_files":    [link.file_a, link.file_b],
+                        "join_cols":       [link.col_a, link.col_b],
+                        "numeric_summary": num_summary,
+                        "link_confidence": link.confidence,
+                    })
+ 
+        except Exception as exc:
+            logger.warning(
+                f"[DataFusion] Merge failed "
+                f"{link.file_a}.{link.col_a}  "
+                f"{link.file_b}.{link.col_b}: {exc}"
+            )
+ 
+    return fused
+ 
+ 
+# ==============================================================================
+# 7.  INSIGHT PRIORITISATION
+# ==============================================================================
+ 
+def _prioritise_insights(
+    links: list[LinkRecord],
+    fused: list[dict],
+    file_data: dict,
+    entity_map: dict,
+) -> list[InsightRecord]:
+    """
+    Generate and rank cross-file insights.
+ 
+    Priority score factors:
+        link confidence          (0 - 1.0)
+        entity importance weight (department/region rank higher than period)
+        numeric variance ratio   (high spread -> more interesting)
+        number of shared values  (more overlap -> more actionable)
+    """
+    _ENTITY_IMPORTANCE = {
+        "department": 1.0,  "region":     0.95, "location":   0.9,
+        "product":    0.85, "employee":   0.85, "customer":   0.8,
+        "vendor":     0.7,  "category":   0.7,  "role":       0.7,
+        "project":    0.65, "cost_center":0.65, "asset":      0.6,
+        "team":       0.6,  "period":     0.5,
+    }
+ 
+    insights: list[InsightRecord] = []
+ 
+    # -- Insight type A: link-level observations -------------------------------
+    for link in links:
+        entity_weight = _ENTITY_IMPORTANCE.get(link.entity_type, 0.5)
+        score = (link.confidence * 0.5
+                 + entity_weight * 0.3
+                 + min(len(link.shared_values) / 10, 1.0) * 0.2)
+ 
+        if link.shared_values:
+            sample_vals = ", ".join(link.shared_values[:4])
+            detail = (
+                f"{link.file_a} and {link.file_b} share "
+                f"{len(link.shared_values)} common {link.entity_type} "
+                f"values (e.g. {sample_vals}). "
+                f"Link confidence: {link.confidence:.0%}. "
+                f"Analyse these shared {link.entity_type}s for correlated trends."
+            )
+        else:
+            detail = (
+                f"{link.file_a} and {link.file_b} both contain a "
+                f"{link.entity_type} dimension. "
+                f"Align reporting on this shared axis."
+            )
+ 
+        title = (
+            f"Cross-file {link.entity_type.title()} connection: "
+            f"{link.file_a}  {link.file_b}"
+        )
+        insights.append(InsightRecord(
+            title       = title,
+            detail      = detail,
+            priority    = _score_to_priority(score),
+            files       = [link.file_a, link.file_b],
+            entity_type = link.entity_type,
+            score       = round(score, 3),
+        ))
+ 
+    # -- Insight type B: numeric fusion observations ---------------------------
+    for rec in fused:
+        if not rec["numeric_summary"]:
+            continue
+ 
+        entity_weight = _ENTITY_IMPORTANCE.get(rec["entity_type"], 0.5)
+ 
+        # Find highest-variance column in this record
+        best_col, best_var = "", 0.0
+        for col, agg in rec["numeric_summary"].items():
+            spread = agg["max"] - agg["min"]
+            if spread > best_var:
+                best_var, best_col = spread, col
+ 
+        # Variance ratio: spread / mean (coefficient of variation proxy)
+        mean_val = rec["numeric_summary"].get(best_col, {}).get("mean", 1) or 1
+        var_ratio = min(best_var / abs(mean_val), 1.0) if mean_val else 0.0
+ 
+        score = (rec["link_confidence"] * 0.4
+                 + entity_weight * 0.3
+                 + var_ratio * 0.3)
+ 
+        if best_col:
+            agg   = rec["numeric_summary"][best_col]
+            detail = (
+                f"For {rec['entity_type']} '{rec['entity_value']}', "
+                f"{best_col} ranges from {agg['min']} to {agg['max']} "
+                f"(mean {agg['mean']}) across "
+                f"{' and '.join(rec['source_files'])}. "
+                f"Investigate this spread for root-cause patterns."
+            )
+            title = (
+                f"{rec['entity_type'].title()} '{rec['entity_value']}': "
+                f"numeric variance in {best_col}"
+            )
+            insights.append(InsightRecord(
+                title       = title,
+                detail      = detail,
+                priority    = _score_to_priority(score),
+                files       = rec["source_files"],
+                entity_type = rec["entity_type"],
+                score       = round(score, 3),
+            ))
+ 
+    # Sort: Critical -> High -> Medium -> Low, then by score desc
+    _ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+    insights.sort(key=lambda i: (_ORDER[i.priority], -i.score))
     return insights
-
-
-def generate_cross_file_insights(fused_data: list, schemas: dict, api_key: str) -> str:
-    """
-    Ask LLM to generate high-level strategic insights from the fused data.
-    This is what gets passed to your document agents.
-    """
-    if not fused_data:
-        return ""
-
-    fused_text = json.dumps(fused_data[:20], indent=2)  # cap to avoid token overflow
-    schema_descs = {k: v["description"] for k, v in schemas.items()}
-
-    prompt = f"""You are a senior business analyst. Multiple datasets have been merged:
-
-Files analyzed: {json.dumps(schema_descs, indent=2)}
-
-Merged cross-file data:
-{fused_text}
-
-Task:
-Generate strategic, analytical insights that CONNECT information across these files.
-Do NOT just list numbers. Identify patterns, correlations, anomalies, and actionable findings.
-
-Format your response as:
-1. KEY FINDINGS (3-5 bullet points connecting data across files)
-2. NOTABLE PATTERNS (trends or correlations discovered)
-3. RECOMMENDED FOCUS AREAS (what a decision-maker should act on)"""
-
-    return call_llm(prompt, api_key)
-
-
+ 
+ 
+def _score_to_priority(score: float) -> str:
+    if score >= 0.75:   return "Critical"
+    if score >= 0.55:   return "High"
+    if score >= 0.35:   return "Medium"
+    return "Low"
+ 
+ 
+# ==============================================================================
+# 8.  CONTEXT RENDERER
+# ==============================================================================
+ 
+def _render_context(
+    file_data:    dict,
+    entity_map:   dict,
+    links:        list[LinkRecord],
+    fused:        list[dict],
+    insights:     list[InsightRecord],
+    ranked_files: list[tuple[str, float]],
+) -> str:
+    lines: list[str] = []
+ 
+    lines.append("===============================================")
+    lines.append("  CROSS-FILE INTELLIGENCE CONTEXT (HPGPT)")
+    lines.append("===============================================\n")
+ 
+    # File relevance ranking
+    lines.append("FILE RELEVANCE RANKING:")
+    for fname, rel_score in ranked_files:
+        intent = file_data[fname].get("intent", "")
+        lines.append(f"  [{rel_score:.2f}] {fname}  (intent: {intent})")
+ 
+    # Entity dimensions per file
+    lines.append("\nENTITY DIMENSIONS DETECTED:")
+    for fname, entities in entity_map.items():
+        if not entities:
+            lines.append(f"  {fname}: no business entity columns")
+            continue
+        lines.append(f"  {fname}:")
+        for etype, info in entities.items():
+            sv = ", ".join(info.get("sample_values", [])[:5])
+            lines.append(
+                f"    - {etype}: cols={info['columns']} | "
+                f"sample values: {sv}"
+            )
+ 
+    # Cross-file links
+    if links:
+        lines.append(f"\nCROSS-FILE ENTITY LINKS ({len(links)} found, "
+                     f"confidence  {_MIN_LINK_CONFIDENCE}):")
+        for lnk in links:
+            flag = " Critical" if lnk.confidence >= 0.75 else \
+                   " High"     if lnk.confidence >= 0.55 else " Medium"
+            lines.append(
+                f"  {flag}  [{lnk.entity_type.upper()}]  "
+                f"{lnk.file_a}.{lnk.col_a}  "
+                f"{lnk.file_b}.{lnk.col_b}  "
+                f"(confidence={lnk.confidence:.0%}, "
+                f"overlap={lnk.value_overlap:.0%})"
+            )
+            if lnk.shared_values:
+                lines.append(
+                    f"      shared values: "
+                    f"{', '.join(lnk.shared_values[:6])}"
+                )
+    else:
+        lines.append("\nCROSS-FILE LINKS: none found above confidence threshold.")
+ 
+    # Fused numeric summaries
+    if fused:
+        lines.append(f"\nCROSS-FILE NUMERIC SUMMARIES ({len(fused)} records):")
+        for rec in fused[:12]:
+            lines.append(
+                f"\n  [{rec['entity_type'].upper()}: {rec['entity_value']}]"
+                f"  sources: {' + '.join(rec['source_files'])}"
+                f"  (link confidence {rec['link_confidence']:.0%})"
+            )
+            for col, agg in list(rec["numeric_summary"].items())[:5]:
+                lines.append(
+                    f"    {col}: "
+                    f"sum={agg['sum']}  mean={agg['mean']}  "
+                    f"min={agg['min']}  max={agg['max']}"
+                )
+ 
+    # Prioritised insights
+    if insights:
+        lines.append(f"\nPRIORITISED CROSS-FILE INSIGHTS ({len(insights)} total):")
+        for ins in insights[:10]:
+            lines.append(f"\n  [{ins.priority.upper()}] {ins.title}")
+            lines.append(f"    {ins.detail}")
+ 
+    # LLM instruction block
+    lines.append("\n-----------------------------------------------")
+    lines.append("INSTRUCTIONS FOR REPORT GENERATION:")
+    lines.append("-----------------------------------------------")
+    if links:
+        entity_types = list({lnk.entity_type for lnk in links})
+        lines.append(
+            f"  - The files share these entity dimensions: "
+            f"{', '.join(entity_types)}"
+        )
+        lines.append(
+            "  - You MUST compare and correlate data across files "
+            "using these shared dimensions."
+        )
+        lines.append(
+            "  - Use connecting language: "
+            "'Taken alongside...', 'This is compounded by...', "
+            "'However, this conflicts with...'"
+        )
+        lines.append(
+            "  - Siloed per-file reporting is FORBIDDEN "
+            "when shared entities exist."
+        )
+        lines.append(
+            "  - Address all CRITICAL and HIGH priority insights above "
+            "explicitly in the report."
+        )
+    else:
+        lines.append(
+            "  - No shared entity links found. "
+            "Analyse each file independently but note any "
+            "thematic connections where they exist."
+        )
+    lines.append("")
+ 
+    return "\n".join(lines)
+ 
+ 
+# ==============================================================================
+# 9.  MAIN CLASS
+# ==============================================================================
+ 
+@dataclass
+class FusionResult:
+    cross_file_context: str
+    ranked_files:       list[tuple[str, float]]
+    links:              list[LinkRecord]
+    insights:           list[InsightRecord]
+    entity_map:         dict
+    fused_records:      list[dict]
+    summary_log:        str
+ 
+ 
 class DataFusionAgent:
     """
-    Multi-file data fusion agent that:
-    - Accepts any file type (CSV, Excel, JSON, text)
-    - Uses LLM to understand each file's schema semantically
-    - Discovers cross-file entity links automatically
-    - Merges data and generates strategic insights
-    - Outputs enriched context ready for document generation agents
+    Cross-file intelligence layer for HPGPT.
+ 
+    Usage:
+        agent  = DataFusionAgent(file_data, user_prompt)
+        result = agent.run()
+ 
+    `file_data` is the dict already built by agent_orchestrator step 1:
+        {clean_filename: data_dict_from_extract_data()}
+ 
+    The agent reuses entities already extracted by data_agent -- no duplication.
     """
-
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.raw_data = {}       # {label: DataFrame or str}
-        self.schemas = {}        # {label: schema dict}
-        self.links = []          # discovered semantic links
-        self.fused = []          # merged insight dicts
-        self.insight_text = ""   # final LLM narrative
-
-    def load(self, files: dict):
-        """files: {label: file_path}"""
-        for label, path in files.items():
-            self.raw_data[label] = load_file(path)
-            print(f"[DataFusionAgent] Loaded '{label}' from {path}")
-
-    def analyze(self):
-        """Run full pipeline: schema → links → fusion → insights"""
-
-        # Step 1: Schema understanding
-        print("[DataFusionAgent] Analyzing schemas...")
-        for label, data in self.raw_data.items():
-            self.schemas[label] = get_schema_summary(label, data, self.api_key)
-            print(f"  '{label}': {self.schemas[label]['description']}")
-
-        # Step 2: Discover semantic links
-        print("[DataFusionAgent] Discovering cross-file entity links...")
-        link_result = find_semantic_links(self.schemas, self.api_key)
-        self.links = link_result.get("links", [])
-        print(f"  Found {len(self.links)} link(s). Reasoning: {link_result.get('reasoning', '')}")
-
-        # Step 3: Fuse data
-        if self.links:
-            print("[DataFusionAgent] Fusing datasets...")
-            self.fused = fuse_on_links(self.raw_data, self.links)
-            print(f"  Generated {len(self.fused)} cross-file entity records.")
-
-        # Step 4: Generate insights narrative
-        print("[DataFusionAgent] Generating strategic insights...")
-        self.insight_text = generate_cross_file_insights(self.fused, self.schemas, self.api_key)
-
-    def to_llm_context(self) -> str:
-        """
-        Returns the full enriched context string to prepend
-        to your existing LLM agent prompts.
-        """
-        parts = []
-
-        parts.append("=== MULTI-FILE ANALYSIS CONTEXT ===\n")
-
-        for label, schema in self.schemas.items():
-            parts.append(f"[{label}]: {schema['description']}")
-
-        if self.links:
-            parts.append(f"\nDiscovered {len(self.links)} cross-file connection(s):")
-            for link in self.links:
-                parts.append(f"  • {link['file_a']}.{link['col_a']} ↔ {link['file_b']}.{link['col_b']} (shared entity: {link['entity']})")
-
-        if self.insight_text:
-            parts.append(f"\n=== CROSS-FILE INSIGHTS ===\n{self.insight_text}")
-
-        return "\n".join(parts)
+ 
+    def __init__(self, file_data: dict, user_prompt: str = ""):
+        self.file_data    = file_data
+        self.user_prompt  = user_prompt
+ 
+    def run(self) -> FusionResult:
+        n = len(self.file_data)
+        logger.info(f"[DataFusion] Starting fusion for {n} file(s).")
+ 
+        # -- Single file -- skip most steps ---------------------------------
+        if n < 2:
+            entity_map   = _build_entity_map(self.file_data)
+            ranked_files = score_file_relevance(self.file_data, self.user_prompt)
+            context      = self._single_file_context(entity_map)
+            return FusionResult(
+                cross_file_context = context,
+                ranked_files       = ranked_files,
+                links              = [],
+                insights           = [],
+                entity_map         = entity_map,
+                fused_records      = [],
+                summary_log        = f"Single file -- no cross-file analysis.",
+            )
+ 
+        # -- Step 1: File relevance ranking --------------------------------
+        ranked_files = score_file_relevance(self.file_data, self.user_prompt)
+ 
+        # -- Step 2: Entity map (reuses data_agent output) -----------------
+        entity_map = _build_entity_map(self.file_data)
+ 
+        # -- Step 3: Link discovery with confidence ------------------------
+        links = _discover_links(entity_map)
+        logger.info(
+            f"[DataFusion] Links found: {len(links)} "
+            f"(above confidence {_MIN_LINK_CONFIDENCE})"
+        )
+ 
+        # -- Step 4: Numeric fusion ----------------------------------------
+        fused = _fuse_numerics(self.file_data, links) if links else []
+        logger.info(f"[DataFusion] Fused numeric records: {len(fused)}")
+ 
+        # -- Step 5: Insight prioritisation -------------------------------
+        insights = _prioritise_insights(links, fused, self.file_data, entity_map)
+        critical = sum(1 for i in insights if i.priority == "Critical")
+        high     = sum(1 for i in insights if i.priority == "High")
+        logger.info(
+            f"[DataFusion] Insights: {len(insights)} total  "
+            f"({critical} Critical, {high} High)"
+        )
+ 
+        # -- Step 6: Render context ----------------------------------------
+        context = _render_context(
+            self.file_data, entity_map,
+            links, fused, insights, ranked_files
+        )
+ 
+        summary = (
+            f"Files: {n} | Links: {len(links)} | "
+            f"Fused records: {len(fused)} | "
+            f"Insights: {len(insights)} "
+            f"({critical} Critical, {high} High)"
+        )
+ 
+        return FusionResult(
+            cross_file_context = context,
+            ranked_files       = ranked_files,
+            links              = links,
+            insights           = insights,
+            entity_map         = entity_map,
+            fused_records      = fused,
+            summary_log        = summary,
+        )
+ 
+    def _single_file_context(self, entity_map: dict) -> str:
+        fname = next(iter(self.file_data))
+        entities = entity_map.get(fname, {})
+        if not entities:
+            return ""
+        lines = [f"ENTITY DIMENSIONS DETECTED in {fname}:"]
+        for etype, info in entities.items():
+            sv = ", ".join(info.get("sample_values", [])[:5])
+            lines.append(f"  - {etype}: {sv}")
+        return "\n".join(lines)

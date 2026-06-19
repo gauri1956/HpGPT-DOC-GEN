@@ -7,8 +7,8 @@
     <style>
         body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif; background: #f4f6fb; }
         .container { display: flex; min-height: 100vh; }
-
-        /* ── Sidebar ── */
+ 
+        /* Sidebar */
         .sidebar {
             width: 300px; background: #00205b; color: #fff;
             display: flex; flex-direction: column; align-items: stretch;
@@ -27,8 +27,8 @@
             background: rgba(255,255,255,0.07); border-radius: 10px;
             color: #e4002b; font-size: 1em; font-weight: 600; text-align: center; line-height: 1.6;
         }
-
-        /* ── File list in sidebar ── */
+ 
+        /* File list in sidebar */
         .sidebar-files { margin: 20px 20px 0 20px; display: flex; flex-direction: column; gap: 0; }
         .sidebar-files-title {
             color: rgba(255,255,255,0.5); font-size: 0.75em;
@@ -53,8 +53,8 @@
         }
         .sidebar-file-remove:hover { background: rgba(228,0,43,0.2); }
         .sidebar-file-count { color: rgba(255,255,255,0.4); font-size: 0.78em; margin-top: 4px; text-align: right; }
-
-        /* ── Main content ── */
+ 
+        /* Main content */
         .main-content {
             flex: 1; background: #fff; border-radius: 0 20px 20px 0;
             margin: 50px 32px 50px 0; display: flex; flex-direction: column;
@@ -86,21 +86,47 @@
             transition: background 0.2s; box-shadow: 0 2px 8px rgba(0,32,91,0.12);
         }
         .download-link:hover { background: #e4002b; }
-
-        /* ── Input form ── */
+ 
+        /* Input form */
         .main-content form.input-form {
-            padding: 12px 24px 20px 24px;
+            padding: 14px 24px 20px 24px;
             display: flex; flex-direction: column; gap: 10px;
             border-top: 1.5px solid #f0f0f0;
         }
-        .input-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; }
+ 
+        /* TEXTAREA replacing the old single-line input */
         #message-input {
-            flex: 1 1 280px; padding: 9px 12px; border-radius: 8px;
-            border: 2px solid #b3d1fa; font-size: 0.95em;
-            background: #fff; transition: border 0.2s; min-width: 0;
+            width: 100%;
+            min-height: 72px;        /* ~3 visible lines */
+            max-height: 200px;       /* won't grow forever */
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 2px solid #b3d1fa;
+            font-size: 0.95em;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #fff;
+            resize: none;            /* we auto-resize via JS */
+            overflow-y: auto;
+            line-height: 1.5;
+            transition: border 0.2s;
+            box-sizing: border-box;
         }
         #message-input:focus { border: 2px solid #00205b; outline: none; }
-
+ 
+        /* Hint text under textarea */
+        .prompt-hint {
+            font-size: 0.76em;
+            color: #999;
+            margin-top: -4px;
+            padding-left: 2px;
+        }
+ 
+        /* Controls row: attach | type | generate */
+        .input-row {
+            display: flex; align-items: center; gap: 10px;
+            flex-wrap: wrap; width: 100%;
+        }
+ 
         /* Hidden file input */
         #attach-file {
             position: absolute; width: 1px; height: 1px;
@@ -132,8 +158,8 @@
         }
         .generate-btn:hover { background: #00205b; }
         .generate-btn:disabled { background: #aaa; cursor: not-allowed; }
-
-        /* ── Loading overlay ── */
+ 
+        /* Loading overlay */
         .loading-overlay {
             display: none; position: fixed; inset: 0;
             background: rgba(0,32,91,0.6); z-index: 9999;
@@ -149,10 +175,10 @@
         .loading-text { color: #fff; font-size: 1.1em; font-weight: 600; letter-spacing: 0.5px; }
         .loading-sub  { color: rgba(255,255,255,0.6); font-size: 0.85em; }
         @keyframes spin { to { transform: rotate(360deg); } }
-
+ 
         .flash { padding: 10px 16px; border-radius: 8px; margin: 12px 24px 0; font-size: 0.9em; }
         .flash.danger { background: #ffeaea; color: #c00; border: 1px solid #f5c6cb; }
-
+ 
         @media (max-width: 900px) {
             .container { flex-direction: column; }
             .sidebar { width: 100%; }
@@ -161,16 +187,16 @@
     </style>
 </head>
 <body>
-
+ 
 <!-- Loading overlay -->
 <div class="loading-overlay" id="loading-overlay">
     <div class="loading-spinner"></div>
-    <div class="loading-text">Generating your document…</div>
+    <div class="loading-text">Generating your document...</div>
     <div class="loading-sub">This may take a minute for multiple files</div>
 </div>
-
+ 
 <div class="container">
-
+ 
     <!-- Sidebar -->
     <aside class="sidebar">
         <div class="sidebar-header">
@@ -184,7 +210,7 @@
             Upload <strong>multiple files</strong> to generate a
             <strong>combined report</strong>.
         </div>
-
+ 
         <!-- Attached files list -->
         <div class="sidebar-files" id="sidebar-files" style="display:none;">
             <div class="sidebar-files-title">Attached Files</div>
@@ -192,23 +218,23 @@
             <div class="sidebar-file-count" id="file-count"></div>
         </div>
     </aside>
-
+ 
     <!-- Main content -->
     <main class="main-content">
         <img src="{{ url_for('static', filename='hp_logo_watermark.jpg') }}"
              alt="HP Watermark" class="hp-watermark">
-
+ 
         <header class="main-header">
             <h2>Document Generator</h2>
         </header>
-
+ 
         <section class="output-section">
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% for category, message in messages %}
                     <div class="flash {{ category }}">{{ message }}</div>
                 {% endfor %}
             {% endwith %}
-
+ 
             <div class="message bot">
                 <div class="message-content">
                     {% if generated_content %}
@@ -218,19 +244,18 @@
                     {% endif %}
                 </div>
             </div>
-
+ 
             {% if download_url %}
             <div class="generated-document">
-                <a class="download-link" href="{{ download_url }}">⬇ Download Output Document</a>
+                <a class="download-link" href="{{ download_url }}">Download Output Document</a>
             </div>
             {% endif %}
         </section>
-
+ 
         <!-- Input form -->
         <form class="input-form" enctype="multipart/form-data"
               method="post" action="{{ url_for('generate') }}" id="main-form">
-
-            <!-- File input outside label, hidden via position not display:none -->
+ 
             <input
                 id="attach-file"
                 name="document"
@@ -238,18 +263,22 @@
                 accept=".txt,.pdf,.csv,.xlsx,.docx"
                 multiple
             >
-
+ 
+            <!-- Multi-line prompt textarea -->
+            <textarea
+                id="message-input"
+                name="prompt"
+                placeholder="Type your prompt here..."
+                autocomplete="off"
+                required
+                rows="3"
+            ></textarea>
+            <div class="prompt-hint">Press Enter to submit &nbsp;|&nbsp; Shift+Enter for a new line</div>
+ 
+            <!-- Controls row -->
             <div class="input-row">
-                <input
-                    id="message-input"
-                    type="text"
-                    name="prompt"
-                    placeholder="Type your prompt here..."
-                    autocomplete="off"
-                    required
-                >
                 <label for="attach-file" class="attach-label" id="attach-label">
-                    📎 Attach Files
+                    Attach Files
                 </label>
                 <label for="doc-type" class="doc-type-label">Type:</label>
                 <select id="doc-type" name="doc_type" class="doc-type-select" required>
@@ -262,7 +291,7 @@
         </form>
     </main>
 </div>
-
+ 
 <script>
     const fileInput    = document.getElementById('attach-file');
     const attachLabel  = document.getElementById('attach-label');
@@ -271,31 +300,31 @@
     const sidebarFiles = document.getElementById('sidebar-files');
     const fileList     = document.getElementById('file-list');
     const fileCount    = document.getElementById('file-count');
-
+    const textarea     = document.getElementById('message-input');
+ 
     // Accumulates files across multiple picker sessions
     let dt = new DataTransfer();
-
-    const ICONS = { pdf: '📄', csv: '📊', xlsx: '📊', xls: '📊', docx: '📝', txt: '📝' };
-
+ 
+    const ICONS = { pdf: 'PDF', csv: 'CSV', xlsx: 'XLS', xls: 'XLS', docx: 'DOC', txt: 'TXT' };
+ 
     function getIcon(name) {
         const ext = name.split('.').pop().toLowerCase();
-        return ICONS[ext] || '📁';
+        return ICONS[ext] || 'FILE';
     }
-
+ 
     function renderSidebar() {
         fileList.innerHTML = '';
         const files = dt.files;
-
+ 
         if (!files || files.length === 0) {
             sidebarFiles.style.display = 'none';
-            attachLabel.innerHTML = '📎 Attach Files';
+            attachLabel.innerHTML = 'Attach Files';
             return;
         }
-
+ 
         sidebarFiles.style.display = 'block';
-        attachLabel.innerHTML =
-            '📎 Attach Files <span class="file-badge">' + files.length + '</span>';
-
+        attachLabel.innerHTML = 'Attach Files <span class="file-badge">' + files.length + '</span>';
+ 
         Array.from(files).forEach(function(file) {
             const item = document.createElement('div');
             item.className = 'sidebar-file-item';
@@ -306,14 +335,14 @@
                 '</div>' +
                 '<button type="button" class="sidebar-file-remove" ' +
                 '  onclick="removeFile(\'' + file.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" ' +
-                '  title="Remove">×</button>';
+                '  title="Remove">x</button>';
             fileList.appendChild(item);
         });
-
+ 
         const n = files.length;
         fileCount.textContent = n + ' file' + (n > 1 ? 's' : '') + ' attached';
     }
-
+ 
     function removeFile(name) {
         const newDt = new DataTransfer();
         Array.from(dt.files).forEach(function(f) {
@@ -323,7 +352,7 @@
         fileInput.files = dt.files;
         renderSidebar();
     }
-
+ 
     // Add newly picked files to accumulated list
     fileInput.addEventListener('change', function() {
         Array.from(fileInput.files).forEach(function(file) {
@@ -333,12 +362,34 @@
         fileInput.files = dt.files;
         renderSidebar();
     });
-
+ 
+    // Auto-resize textarea as user types
+    textarea.addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+    });
+ 
+    // Enter submits, Shift+Enter adds new line
+    textarea.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            if (this.value.trim()) {
+                form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                form.submit();
+            }
+        }
+    });
+ 
     // Show loading on submit
-    form.addEventListener('submit', function() {
+    form.addEventListener('submit', function(e) {
+        if (!textarea.value.trim()) {
+            e.preventDefault();
+            return;
+        }
         overlay.classList.add('active');
         document.getElementById('gen-btn').disabled = true;
     });
 </script>
 </body>
 </html>
+ 
