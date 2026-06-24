@@ -633,6 +633,7 @@ def _summarize_df(df: pd.DataFrame, file_name: str = "") -> dict:
     domain_map, causal_hints, contradiction_seeds = _generate_metadata_heuristics(df, useful_numeric)
 
     return {
+        "raw_df":           df,
         "columns":          df.columns.tolist(),
         "row_count":        len(df),
         "numeric_cols":     useful_numeric,
@@ -697,8 +698,10 @@ def _summarize_multisheet(sheets_dict: dict, file_name: str = "") -> dict:
             f"{list(cross_sheet_entities.keys())}"
         )
  
+    sheets_df = {sname: sdata["raw_df"] for sname, sdata in sheets_summary.items() if "raw_df" in sdata}
     return {
         "sheets":               sheets_summary,
+        "sheets_df":            sheets_df,
         "entities":             all_entities,
         "cross_sheet_entities": cross_sheet_entities,
         "file":                 file_name,

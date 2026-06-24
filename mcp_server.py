@@ -129,8 +129,13 @@ def generate_chart(
     Returns:
         {"path": "<image_path>", "title": "<title>"}
     """
-    if len(labels) != len(values):
-        return {"error": "labels and values must have the same length"}
+    if isinstance(values, dict):
+        for k, v in values.items():
+            if len(labels) != len(v):
+                return {"error": f"labels and series '{k}' values must have the same length"}
+    else:
+        if len(labels) != len(values):
+            return {"error": "labels and values must have the same length"}
  
     # Fix up casing so acronyms like KL/HPCL/IOCL/LPG/ATF/INR render correctly
     title   = _smart_case(title)
@@ -142,24 +147,32 @@ def generate_chart(
               "#f5821e", "#1a1a1a", "#6d6e71"]
  
     ct = chart_type.lower()
-    value_labels = [_fmt_value_label(v) for v in values]
  
     if ct == "bar":
+        value_labels = [_fmt_value_label(v) for v in values]
         bars = ax.bar(labels, values, color=colors[:len(labels)], width=0.6)
         ax.bar_label(bars, labels=value_labels, padding=3, fontsize=9, color="#333")
         if x_label: ax.set_xlabel(x_label, fontsize=10)
         if y_label: ax.set_ylabel(y_label, fontsize=10)
  
     elif ct == "horizontal_bar":
+        value_labels = [_fmt_value_label(v) for v in values]
         bars = ax.barh(labels, values, color=colors[:len(labels)], height=0.6)
         ax.bar_label(bars, labels=value_labels, padding=3, fontsize=9, color="#333")
         if x_label: ax.set_xlabel(x_label, fontsize=10)
         if y_label: ax.set_ylabel(y_label, fontsize=10)
  
     elif ct == "line":
-        ax.plot(labels, values, color=HP_BLUE, linewidth=2.5,
-                marker="o", markersize=6, markerfacecolor=HP_RED)
-        ax.fill_between(range(len(labels)), values, alpha=0.08, color=HP_BLUE)
+        if isinstance(values, dict):
+            for i, (series_name, series_vals) in enumerate(values.items()):
+                color = colors[i % len(colors)]
+                ax.plot(labels, series_vals, color=color, linewidth=2,
+                        marker="o", markersize=4, label=series_name)
+            ax.legend(fontsize=9, loc="best")
+        else:
+            ax.plot(labels, values, color=HP_BLUE, linewidth=2.5,
+                    marker="o", markersize=6, markerfacecolor=HP_RED)
+            ax.fill_between(range(len(labels)), values, alpha=0.08, color=HP_BLUE)
         if x_label: ax.set_xlabel(x_label, fontsize=10)
         if y_label: ax.set_ylabel(y_label, fontsize=10)
  

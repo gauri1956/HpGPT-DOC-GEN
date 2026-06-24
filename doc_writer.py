@@ -32,12 +32,12 @@ _OFFICIAL_DOC_TYPES = {
 }
  
  
-def parse_official_header(body_text, doc_type=None):
+def parse_official_header(body_text, doc_type=None, user_prompt=None):
     """
     Extracts the header fields (Ref, Date, Subject, Dept, To, From etc.)
     from the top of the LLM output and returns them as a dict,
     along with the remaining body text.
- 
+
     FIX: The footer scanner (Prepared by / Approved by etc.) now only
     activates AFTER the last ## section has ended. This prevents it from
     accidentally stripping approval lines that appear INSIDE Section 7
@@ -126,6 +126,20 @@ def parse_official_header(body_text, doc_type=None):
     for k in ['ref_no', 'date', 'subject', 'department', 'to', 'from']:
         if k in header_fields and ('[' in header_fields[k] or ']' in header_fields[k]):
             header_fields[k] = ""
+            
+    # Scrub invented dates
+    if 'date' in header_fields and header_fields['date']:
+        date_val = header_fields['date']
+        if '_' not in date_val and user_prompt:
+            prompt_lower = user_prompt.lower()
+            words = re.findall(r'\b\w+\b', date_val.lower())
+            found = False
+            for w in words:
+                if w in prompt_lower:
+                    found = True
+                    break
+            if not found:
+                header_fields['date'] = "__________________"
  
     # -- FIX: Footer scanner --
     # Only scan for trailing signature/distribution lines AFTER the last ## section.
@@ -194,20 +208,10 @@ def _add_official_header(doc, metadata, doc_type):
     ref_candidate = (metadata.get("ref_no") or metadata.get("file_no") or
                      metadata.get("note_no") or metadata.get("no"))
  
-    ol = (org_candidate or "").lower()
     if not org_candidate:
-        if "bpcl" in ol or "bharat petroleum" in ol:
-            org_candidate = "BHARAT PETROLEUM CORPORATION LIMITED"
-        elif "iocl" in ol or "indian oil" in ol or "indianoil" in ol:
-            org_candidate = "INDIAN OIL CORPORATION LIMITED"
-        elif "ongc" in ol or "oil and natural gas" in ol:
-            org_candidate = "OIL AND NATURAL GAS CORPORATION LIMITED"
-        elif "gail" in ol:
-            org_candidate = "GAIL (INDIA) LIMITED"
-        else:
-            org_candidate = "HINDUSTAN PETROLEUM CORPORATION LIMITED"
+        org_candidate = "__________________________________________________"
  
-    org = org_candidate or "HINDUSTAN PETROLEUM CORPORATION LIMITED"
+    org = org_candidate
     ref = ref_candidate or "__________________"
  
     # Company Name
@@ -363,11 +367,12 @@ def _add_official_footer(doc, metadata):
                     r_item.font.size = Pt(10)
  
  
-def generate_docx(body, output_path, title="Generated Document", chart_images=None, doc_type=None):
+def generate_docx(body, output_path, title="Generated Document", chart_images=None, doc_type=None, user_prompt=None):
     chart_images = _dedupe_charts(list(chart_images or []))
     doc = Document()
  
     body = _strip_chart_placeholders(body)
+    body = _clean_bracketed_placeholders(body)
  
     is_official = doc_type in _OFFICIAL_DOC_TYPES
     metadata = {}
@@ -375,7 +380,7 @@ def generate_docx(body, output_path, title="Generated Document", chart_images=No
     org_name = ""
     if is_official:
         # Pass doc_type so footer scanner knows not to strip purchase_note body lines
-        metadata, body = parse_official_header(body, doc_type=doc_type)
+        metadata, body = parse_official_header(body, doc_type=doc_type, user_prompt=user_prompt)
         org_name = (metadata.get('organization') or metadata.get('company') or
                     metadata.get('org') or "")
         if not org_name:
@@ -390,6 +395,9 @@ def generate_docx(body, output_path, title="Generated Document", chart_images=No
                 org_name = "GAIL (INDIA) LIMITED"
             elif "hpcl" in bl or "hindustan petroleum" in bl:
                 org_name = "HINDUSTAN PETROLEUM CORPORATION LIMITED"
+            else:
+                org_name = "__________________________________________________"
+        metadata['organization'] = org_name
         _apply_theme(org_name)
         _add_official_header(doc, metadata, doc_type)
     else:
@@ -471,6 +479,27 @@ def _strip_chart_placeholders(text):
             continue
         cleaned.append(line)
     return '\n'.join(cleaned)
+
+
+def _clean_bracketed_placeholders(text):
+    def replacer(match):
+        content = match.group(1).lower().strip()
+        if content.startswith('chart:') or (len(content) <= 4 and content.isupper()):
+            return match.group(0)
+        placeholder_words = {
+            'tbd', 'insert', 'todo', 'placeholder', 'draft', 'unknown', 'xxxx', 'yyyy',
+            'subject', 'ref', 'date', 'name', 'cost', 'amount', 'budget', 'value', 'price',
+            'officer', 'authority', 'sign', 'signature', 'designation', 'approved', 'recommended',
+            'item', 'service', 'description', 'spec', 'quantity', 'qty'
+        }
+        if any(w in content for w in placeholder_words) or len(content) > 4:
+            if 'cost' in content or 'amount' in content or 'budget' in content or 'price' in content:
+                return "Rs. __________________"
+            if 'date' in content:
+                return "__________________"
+            return "__________________"
+        return match.group(0)
+    return re.sub(r'\[([^\]]+)\]', replacer, text)
  
  
 # ── Deduplication ─────────────────────────────────────────────────────────────

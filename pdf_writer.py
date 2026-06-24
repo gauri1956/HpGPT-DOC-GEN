@@ -86,7 +86,7 @@ _OFFICIAL_DOC_TYPES = {
 #   4. Added 'note_no', 'notice_no', 'order_no', 'circular_no' to header key
 #      normalisation set (was missing previously)
 
-def parse_official_header(body_text, doc_type=None):
+def parse_official_header(body_text, doc_type=None, user_prompt=None):
     """
     Extracts header fields and returns (header_dict, remaining_body_text).
 
@@ -187,6 +187,20 @@ def parse_official_header(body_text, doc_type=None):
                 '[' in header_fields[k] or ']' in header_fields[k]):
             header_fields[k] = ""
 
+    # Scrub invented dates
+    if 'date' in header_fields and header_fields['date']:
+        date_val = header_fields['date']
+        if '_' not in date_val and user_prompt:
+            prompt_lower = user_prompt.lower()
+            words = re.findall(r'\b\w+\b', date_val.lower())
+            found = False
+            for w in words:
+                if w in prompt_lower:
+                    found = True
+                    break
+            if not found:
+                header_fields['date'] = "__________________"
+
     # ── Footer scanner (signature / distribution lines) ─────────────────────
     # PATCH: Only scan lines that appear AFTER the last ## section heading
     # plus a 20-line safety buffer.  This stops the scanner from eating
@@ -256,19 +270,9 @@ def _draw_official_pdf_header(c, metadata, doc_type, y):
                      or metadata.get("no"))
 
     if not org_candidate:
-        ol = ""
-        if "bpcl" in ol or "bharat petroleum" in ol:
-            org_candidate = "BHARAT PETROLEUM CORPORATION LIMITED"
-        elif "iocl" in ol or "indian oil" in ol or "indianoil" in ol:
-            org_candidate = "INDIAN OIL CORPORATION LIMITED"
-        elif "ongc" in ol or "oil and natural gas" in ol:
-            org_candidate = "OIL AND NATURAL GAS CORPORATION LIMITED"
-        elif "gail" in ol:
-            org_candidate = "GAIL (INDIA) LIMITED"
-        else:
-            org_candidate = "HINDUSTAN PETROLEUM CORPORATION LIMITED"
+        org_candidate = "__________________________________________________"
 
-    org = org_candidate or "HINDUSTAN PETROLEUM CORPORATION LIMITED"
+    org = org_candidate
     ref = ref_candidate or "__________________"
 
     # Company name
@@ -393,23 +397,10 @@ def _draw_official_pdf_footer(c, metadata, y):
                 draw_footer(c)
                 c.showPage()
                 y = PAGE_HEIGHT - TOP_MARGIN
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(LEFT_MARGIN, y, label)
-            y -= 12
-            c.setFont("Helvetica", 9)
-            for item in val.split(','):
-                it = item.strip()
-                if it:
-                    c.drawString(LEFT_MARGIN + 15, y, f"• {it}")
-                    y -= 12
-
-    return y
-
-
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def generate_pdf(body, output_path="outputs/output.pdf",
-                 title="AI Generated PDF", chart_images=None, doc_type=None):
+                 title="AI Generated PDF", chart_images=None, doc_type=None, user_prompt=None):
     os.makedirs(
         os.path.dirname(output_path) if os.path.dirname(output_path) else '.',
         exist_ok=True,
@@ -417,6 +408,7 @@ def generate_pdf(body, output_path="outputs/output.pdf",
     chart_images = _dedupe_charts(list(chart_images or []))
     display_title = _clean_title(title)
     body = _strip_chart_placeholders(body)
+    body = _clean_bracketed_placeholders(body)
 
     is_official = doc_type in _OFFICIAL_DOC_TYPES
     metadata    = {}
@@ -426,7 +418,7 @@ def generate_pdf(body, output_path="outputs/output.pdf",
     org_name = ""
     if is_official:
         # PATCH: pass doc_type so purchase_note skips footer scan
-        metadata, body = parse_official_header(body, doc_type=doc_type)
+        metadata, body = parse_official_header(body, doc_type=doc_type, user_prompt=user_prompt)
         org_name = (metadata.get('organization')
                     or metadata.get('company')
                     or metadata.get('org') or "")
@@ -442,6 +434,7 @@ def generate_pdf(body, output_path="outputs/output.pdf",
                 org_name = "GAIL (INDIA) LIMITED"
             elif "hpcl" in bl or "hindustan petroleum" in bl:
                 org_name = "HINDUSTAN PETROLEUM CORPORATION LIMITED"
+        metadata['organization'] = org_name
     else:
         _draw_cover(c, display_title)
         c.showPage()
@@ -568,6 +561,27 @@ def _strip_chart_placeholders(text):
         line for line in text.splitlines()
         if not _CHART_LINE.match(line)
     )
+
+
+def _clean_bracketed_placeholders(text):
+    def replacer(match):
+        content = match.group(1).lower().strip()
+        if content.startswith('chart:') or (len(content) <= 4 and content.isupper()):
+            return match.group(0)
+        placeholder_words = {
+            'tbd', 'insert', 'todo', 'placeholder', 'draft', 'unknown', 'xxxx', 'yyyy',
+            'subject', 'ref', 'date', 'name', 'cost', 'amount', 'budget', 'value', 'price',
+            'officer', 'authority', 'sign', 'signature', 'designation', 'approved', 'recommended',
+            'item', 'service', 'description', 'spec', 'quantity', 'qty'
+        }
+        if any(w in content for w in placeholder_words) or len(content) > 4:
+            if 'cost' in content or 'amount' in content or 'budget' in content or 'price' in content:
+                return "Rs. __________________"
+            if 'date' in content:
+                return "__________________"
+            return "__________________"
+        return match.group(0)
+    return re.sub(r'\[([^\]]+)\]', replacer, text)
 
 
 # ── Deduplication ─────────────────────────────────────────────────────────────

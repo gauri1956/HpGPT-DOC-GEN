@@ -368,7 +368,7 @@ def run_insight(all_results, user_prompt, output_format="pdf",
     combined = "\n\n---\n\n".join(
         f"Facts from dataset {i + 1}:\n{digest}"
         for i, digest in enumerate(digests)
-    )[:6000]
+    )[:3500]
  
     # -- Build the full prompt -------------------------------------------------
     # Structure:

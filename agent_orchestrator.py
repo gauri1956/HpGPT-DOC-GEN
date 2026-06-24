@@ -23,11 +23,11 @@ _DOCTYPE_SIGNALS = {
     # --- Official government/PSU document types ---
     "file_note": [
         'file note', 'filenote', 'noting', 'office note',
-        'note for file', 'note on file',
+        'note for file', 'note on file', 'note sheet', 'noting sheet',
     ],
     "office_memorandum": [
-        'office memorandum', 'office memo', 'o.m.', 'om ',
-        'official memorandum', 'internal memorandum',
+        'office memorandum', 'office memo', 'o.m.', 'om',
+        'official memorandum', 'internal memorandum', 'memorandum', 'memo',
     ],
     "office_notice": [
         # "notice" alone is intentionally excluded -- too broad.
@@ -43,6 +43,7 @@ _DOCTYPE_SIGNALS = {
     "purchase_note": [
         'purchase note', 'procurement note', 'purchase order note',
         'indent note', 'purchase proposal', 'procurement proposal',
+        'purchase request', 'procurement request',
         'purchase of ', 'procurement of ',
     ],
     "office_order": [
@@ -79,14 +80,74 @@ _OFFICIAL_DOC_TYPES = {
     "file_note", "office_memorandum", "office_notice",
     "circular", "purchase_note", "office_order"
 }
+
+# High-priority document types where explicit request should not be overridden by generic topic keywords
+_HIGH_PRIORITY_DOC_TYPES = {
+    "file_note", "office_memorandum", "office_notice",
+    "circular", "purchase_note", "office_order",
+    "business_report", "financial_report", "sop"
+}
  
  
+def _match_signal(pl: str, sig: str) -> bool:
+    sig_stripped = sig.strip()
+    if not sig_stripped:
+        return False
+    
+    words = sig_stripped.split()
+    if not words:
+        return False
+        
+    escaped_words = []
+    for i, w in enumerate(words):
+        # Only apply pluralization logic to the last word
+        if i == len(words) - 1 and w[-1].isalnum():
+            w_lower = w.lower()
+            if w_lower.endswith('y'):
+                # policy -> policies
+                base = re.escape(w[:-1])
+                escaped_words.append(f"(?:{base}y|{base}ies)")
+            elif w_lower.endswith('um'):
+                # memorandum -> memorandums / memoranda
+                base = re.escape(w[:-2])
+                escaped_words.append(f"(?:{base}um|{base}ums|{base}a)")
+            elif any(w_lower.endswith(sfx) for sfx in ('s', 'x', 'z', 'ch', 'sh')):
+                escaped_words.append(f"{re.escape(w)}(?:es)?")
+            else:
+                escaped_words.append(f"{re.escape(w)}s?")
+        else:
+            escaped_words.append(re.escape(w))
+            
+    escaped_sig = r'\s+'.join(escaped_words)
+    
+    # Construct regex pattern
+    pattern = ""
+    # Start boundary: if first char is alphanumeric, enforce word boundary
+    if sig_stripped[0].isalnum():
+        pattern += r'\b'
+    pattern += escaped_sig
+    # End boundary: if last char is alphanumeric, enforce word boundary
+    if sig_stripped[-1].isalnum():
+        pattern += r'\b'
+        
+    # Compile and search
+    return bool(re.search(pattern, pl))
+
+
 def _detect_doc_type_from_prompt(prompt: str) -> str | None:
     pl = prompt.lower()
+    matches = [] # list of (doc_type, match_length, is_high_priority)
     for doc_type, signals in _DOCTYPE_SIGNALS.items():
-        if any(sig in pl for sig in signals):
-            logger.info(f"Doc type detected from prompt: {doc_type}")
-            return doc_type
+        for sig in signals:
+            if _match_signal(pl, sig):
+                is_high = doc_type in _HIGH_PRIORITY_DOC_TYPES
+                matches.append((doc_type, len(sig.strip()), is_high))
+    if matches:
+        # Sort by is_high_priority (True first), then by match length descending
+        matches.sort(key=lambda x: (x[2], x[1]), reverse=True)
+        detected = matches[0][0]
+        logger.info(f"Doc type detected from prompt: {detected} (matches: {matches})")
+        return detected
     return None
  
  
@@ -151,25 +212,25 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
     warnings = []
  
     if not body or len(body.strip()) < 200:
-        warnings.append("VALIDATION: Generated body is too short (< 200 chars).")
+        warnings.append("Validation Warning: Generated body is too short (< 200 chars). Provide more detailed instructions.")
  
     # For official docs, don't require ## headings in the same way
     if doc_type not in _OFFICIAL_DOC_TYPES and '##' not in body:
-        warnings.append("VALIDATION: No section headings (##) found in output.")
+        warnings.append("Validation Warning: No section headings (##) found in output. Structure the document with appropriate headers.")
  
     # 1. Title generic validation
     generic_titles = ["hpcl document", "untitled document", "report", "learning module",
                       "employee training program", "development program", "kpi dashboard",
                       "training presentation"]
     if title and any(gt == title.lower().strip() for gt in generic_titles):
-        warnings.append(f"VALIDATION: Document title '{title}' appears generic.")
+        warnings.append(f"Validation Warning: Document title '{title}' appears generic. Generate a specific, descriptive title.")
  
     # 2. Section placeholders check -- skip for official docs (they use underlines intentionally)
     if doc_type not in _OFFICIAL_DOC_TYPES:
         placeholders = ['[insert', '[tbd]', '[todo]', '[placeholder]', 'lorem ipsum']
         for ph in placeholders:
             if ph in body.lower():
-                warnings.append(f"VALIDATION: Placeholder text found: '{ph}'")
+                warnings.append(f"Validation Warning: Placeholder text '{ph}' found. Replace all placeholders with actual content.")
  
     # 3. File reference check -- only for non-official docs
     if doc_type not in _OFFICIAL_DOC_TYPES and file_data:
@@ -186,7 +247,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
             found = (dname in body.lower() or
                      any(c in body.lower() for c in top_cols if len(c) > 4))
             if not found:
-                warnings.append(f"VALIDATION: File '{fname}' may not be referenced in output.")
+                warnings.append(f"Validation Warning: File '{fname}' is not referenced in the output. Integrate details from this file.")
  
     # 4. Multi-file comparison validation
     if len(file_data) > 1 and doc_type not in _OFFICIAL_DOC_TYPES:
@@ -194,7 +255,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                             "compounded", "across", "versus", "vs", "difference"]
         has_connecting = any(w in body.lower() for w in connecting_words)
         if not has_connecting:
-            warnings.append("VALIDATION: No cross-file comparison terms found. Report may be siloed.")
+            warnings.append("Validation Warning: No cross-file comparison terms found. The report may be siloed across files.")
  
         if cross_file_insights:
             referenced_insights = 0
@@ -212,7 +273,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                         referenced_insights += 1
  
             if referenced_insights == 0:
-                warnings.append("VALIDATION: None of the prioritized cross-file insights were detected in the generated body.")
+                warnings.append("Validation Warning: None of the prioritized cross-file insights were detected in the generated body. Ensure cross-file connections are analyzed.")
  
     # 5. Recommendation specificity check
     recs_match = re.search(r'##\s*Recommendations\b.*', body, re.IGNORECASE | re.DOTALL)
@@ -221,34 +282,110 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
         has_numbers = any(char.isdigit() for char in recs_text)
         if not has_numbers:
             warnings.append(
-                "VALIDATION: Recommendations section lacks numeric data or specific metrics."
+                "Validation Warning: Recommendations section lacks numeric data or specific metrics. Tie recommendations to numeric findings."
             )
+ 
+    # 5b. Recommendations structured sections check for business_report
+    if doc_type == "business_report":
+        recs_match = re.search(r'##\s*(?:Strategic\s+)?Recommendations\b.*', body, re.IGNORECASE | re.DOTALL)
+        if recs_match:
+            recs_text = recs_match.group()
+            missing_structure = []
+            for term in ["Recommendation", "Operational Rationale", "Expected Outcome & Metrics"]:
+                if term.lower() not in recs_text.lower():
+                    missing_structure.append(term)
+            if missing_structure:
+                warnings.append(
+                    f"Validation Warning: Strategic recommendations are missing structured format sections: {missing_structure}. "
+                    f"Each recommendation must include: Recommendation, Operational Rationale, and Expected Outcome & Metrics."
+                )
  
     # 6. Official document structural compliance
     if doc_type in _OFFICIAL_DOC_TYPES:
         if "subject:" not in body.lower() and not any("subject:" in s.lower() for s in body.splitlines()[:15]):
-            warnings.append("VALIDATION: Official document is missing the required 'Subject:' header block.")
+            warnings.append("Validation Warning: Official document is missing the required 'Subject:' header block. Please ensure a subject line is included at the top.")
  
         sig_indicators = ["prepared by", "sd/-", "approved by", "recommended by", "submitted for approval"]
         if not any(ind in body.lower() for ind in sig_indicators):
-            warnings.append("VALIDATION: Official document lacks signature workflow indicators.")
+            warnings.append("Validation Warning:\nNo approval authority or signatory block detected.")
  
         if doc_type in ["file_note", "office_memorandum", "circular"]:
             bullet_count = body.count("\n- ") + body.count("\n* ")
             if bullet_count > 5:
                 warnings.append(
-                    f"VALIDATION: Official document type '{doc_type}' should use numbered paragraphs "
+                    f"Validation Warning: Official document type '{doc_type}' should use numbered paragraphs "
                     f"rather than bullet points."
                 )
  
-        # Purchase note specific: check for substantive sections
+        # Purchase Note specific template check
         if doc_type == "purchase_note":
-            section_markers = ["## 1.", "## 2.", "## 3.", "## 7."]
-            missing = [s for s in section_markers if s.lower() not in body.lower()]
-            if missing:
+            template_leftovers = [
+                "write 3-5 numbered paragraphs",
+                "explain what exactly",
+                "provide a markdown table",
+                "for unknown values",
+                "write 2-3 numbered paragraphs",
+                "write a clear, formal recommendation"
+            ]
+            found_leftovers = [tl for tl in template_leftovers if tl in body.lower()]
+            if found_leftovers:
                 warnings.append(
-                    f"VALIDATION: Purchase Note is missing required sections: {missing}"
+                    f"Validation Warning: Purchase Note contains template instruction text: {found_leftovers}. "
+                    f"Ensure all template instructions are replaced with actual content."
                 )
+ 
+        # 6b. Mandatory sections check for official document types
+        mandatory_checks = {
+            "file_note": [
+                ("## background / facts", "Validation Warning: File Note is missing the mandatory 'Background / Facts of the Case' section."),
+                ("## analysis / deliberations", "Validation Warning: File Note is missing the mandatory 'Analysis / Deliberations' section."),
+                ("## recommendation", "Validation Warning: File Note is missing the mandatory 'Recommendation' section."),
+                ("## approval sought", "Validation Warning: File Note is missing the mandatory 'Approval Sought' section."),
+                ("submitted for approval", "Validation Warning: File Note is missing the mandatory 'Submitted for Approval' signature block.")
+            ],
+            "office_memorandum": [
+                ("no.:", "Validation Warning: Office Memorandum is missing 'No.:' in the header block."),
+                ("from:", "Validation Warning: Office Memorandum is missing 'From:' in the header block."),
+                ("to:", "Validation Warning: Office Memorandum is missing 'To:' in the header block."),
+                ("## body", "Validation Warning: Office Memorandum is missing the mandatory 'Body' section."),
+                ("sd/-", "Validation Warning: Office Memorandum is missing the 'Sd/-' signature marker.")
+            ],
+            "office_notice": [
+                ("notice no.:", "Validation Warning: Office Notice is missing 'Notice No.:' in the header block."),
+                ("## notice body", "Validation Warning: Office Notice is missing the mandatory 'Notice Body' section."),
+                ("## compliance", "Validation Warning: Office Notice is missing the mandatory 'Compliance / Action Required' section."),
+                ("by order", "Validation Warning: Office Notice is missing the 'By Order' authority line."),
+                ("distribution:", "Validation Warning: Office Notice is missing the 'Distribution:' list.")
+            ],
+            "circular": [
+                ("circular no.", "Validation Warning: Circular is missing 'Circular No.' in the header block."),
+                ("## preamble", "Validation Warning: Circular is missing the mandatory 'Preamble / Background' section."),
+                ("## instructions", "Validation Warning: Circular is missing the mandatory 'Instructions / Directives' section."),
+                ("## effective date", "Validation Warning: Circular is missing the mandatory 'Effective Date' section."),
+                ("distribution:", "Validation Warning: Circular is missing the 'Distribution:' list.")
+            ],
+            "purchase_note": [
+                ("## 1. purpose", "Validation Warning: Purchase Note is missing 'Purpose and Operational Requirement' section."),
+                ("## 2. specification", "Validation Warning: Purchase Note is missing 'Specification of Items / Services' section."),
+                ("## 3. operational justification", "Validation Warning: Purchase Note is missing 'Operational Justification and Risk of Non-Procurement' section."),
+                ("## 4. budget provision", "Validation Warning: Purchase Note is missing 'Budget Provision and Financial Considerations' section."),
+                ("## 5. procurement method", "Validation Warning: Purchase Note is missing 'Procurement Method and Vendor Strategy' section."),
+                ("## 6. proposed delivery", "Validation Warning: Purchase Note is missing 'Proposed Delivery Schedule' section."),
+                ("## 7. recommendation", "Validation Warning: Purchase Note is missing 'Recommendation and Approval Sought' section.")
+            ],
+            "office_order": [
+                ("office order no.", "Validation Warning: Office Order is missing 'Office Order No.' in the header block."),
+                ("## order", "Validation Warning: Office Order is missing the mandatory 'Order' section."),
+                ("## effective date", "Validation Warning: Office Order is missing the mandatory 'Effective Date' section."),
+                ("## compliance", "Validation Warning: Office Order is missing the mandatory 'Compliance' section."),
+                ("copy to:", "Validation Warning: Office Order is missing the 'Copy to:' distribution list.")
+            ]
+        }
+        
+        checks = mandatory_checks.get(doc_type, [])
+        for term, warning_msg in checks:
+            if term not in body.lower():
+                warnings.append(warning_msg)
  
         # Anti-hallucination: check for invented person names
         honorific_match = re.search(
@@ -257,8 +394,8 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
         )
         if honorific_match:
             warnings.append(
-                f"VALIDATION: Potential invented person name found: '{honorific_match.group()}'. "
-                f"Use blank underlines for name fields."
+                f"Validation Warning: Potential invented person name found: '{honorific_match.group()}'. "
+                f"Use blank underlines for name fields to avoid hallucination."
             )
  
         # Check for invented specific dates (DD/MM/YYYY)
@@ -268,8 +405,8 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                 in_files = any(dt in str(fdata) for fdata in file_data.values())
                 if not in_files:
                     warnings.append(
-                        f"VALIDATION: Potential invented date found: '{dt}'. "
-                        f"Use blank underlines for unknown dates."
+                        f"Validation Warning: Potential invented date found: '{dt}'. "
+                        f"Use blank underlines for unknown dates to avoid hallucination."
                     )
  
     # 7. Trend validation -- only for non-official analytical docs
@@ -306,7 +443,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                                 pos in window for pos in ["increase", "grow", "rose", "rising", "climb", "upward"]
                             ):
                                 warnings.append(
-                                    f"VALIDATION: Trend contradiction for '{col}' in '{fname}'. "
+                                    f"Validation Warning: Trend contradiction for '{col}' in '{fname}'. "
                                     f"Data indicates UP but body has negative keywords."
                                 )
                         elif direction == "down":
@@ -315,7 +452,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                                 neg in window for neg in ["decrease", "decline", "drop", "fell", "downward", "shrank", "reduced"]
                             ):
                                 warnings.append(
-                                    f"VALIDATION: Trend contradiction for '{col}' in '{fname}'. "
+                                    f"Validation Warning: Trend contradiction for '{col}' in '{fname}'. "
                                     f"Data indicates DOWN but body has positive keywords."
                                 )
                         idx += len(clean_col)
@@ -634,6 +771,45 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
     # ==========================================================================
     # STEP 5 -- Verify chart paths
     # ==========================================================================
+    def select_top_high_value_charts(charts, max_charts=6):
+        categories = {
+            "revenue_trend": ["revenue", "turnover trend"],
+            "market_comparison": ["market", "comparison", "hpcl vs", "omc", "bpcl", "iocl", "reliance", "nayara"],
+            "inventory_comparison": ["inventory", "closing stock", "opening stock", "stock levels"],
+            "turnover_comparison": ["turnover ratio", "turnover comparison", "stock movement"],
+            "stock_imbalance": ["imbalance", "stock share", "sales share", "stock vs sales"],
+            "product_contribution": ["contribution", "product-wise", "product sales", "sales by product"]
+        }
+        
+        selected = {}
+        remaining = []
+        
+        for chart in charts:
+            title, path, sig = chart
+            title_lower = title.lower()
+            
+            matched_cat = None
+            for cat, keywords in categories.items():
+                if any(k in title_lower for k in keywords):
+                    matched_cat = cat
+                    break
+                    
+            if matched_cat:
+                if matched_cat not in selected:
+                    selected[matched_cat] = chart
+                else:
+                    remaining.append(chart)
+            else:
+                remaining.append(chart)
+                
+        result = list(selected.values())
+        for r in remaining:
+            if len(result) >= max_charts:
+                break
+            result.append(r)
+        return result
+
+    ordered_charts = select_top_high_value_charts(ordered_charts, max_charts=6)
     logger.info(f"Total charts to embed: {len(ordered_charts)}")
     verified = [(h, p) for h, p, _sig in ordered_charts if os.path.exists(p)]
     logger.info(f"Verified chart paths: {len(verified)}")
@@ -644,11 +820,11 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
     output_path = _resolve_path(_sanitize(title, output_format))
  
     if output_format == "docx":
-        generate_docx(body, output_path, title, chart_images=verified, doc_type=doc_type)
+        generate_docx(body, output_path, title, chart_images=verified, doc_type=doc_type, user_prompt=prompt)
         return output_path
  
     elif output_format == "pdf":
-        generate_pdf(body, output_path, title, chart_images=verified, doc_type=doc_type)
+        generate_pdf(body, output_path, title, chart_images=verified, doc_type=doc_type, user_prompt=prompt)
         return output_path
  
     elif output_format == "pptx":
@@ -758,26 +934,44 @@ def _title_case(text: str) -> str:
  
  
 def _fallback_title(prompt: str) -> str:
-    words = re.sub(r'[^\w\s]', '', prompt).strip().split()
-    words = [w for w in words if w.lower() not in _TITLE_FILLER]
-    raw   = ' '.join(words[:7]) or 'HPCL Document'
-    return _title_case(raw)
- 
- 
+    # Robust fallback title based on clean prompt subject
+    clean_words = []
+    strip_words = {
+        'generate', 'create', 'write', 'draft', 'make', 'produce', 'act', 'as', 'senior',
+        'management', 'consultant', 'prepare', 'a', 'an', 'the', 'for', 'me', 'please',
+        'give', 'doc', 'report', 'document', 'file', 'note', 'notice', 'memorandum',
+        'circular', 'order', 'memo', 'docx', 'pdf', 'pptx', 'in', 'format', 'on', 'with',
+        'and', 'about', 'our', 'us', 'office', 'purchase', 'procurement', 'corporate',
+        'internal', 'official', 'departmental', 'department', 'of', 'to', 'from', 'at',
+        'by', 'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were', 'will', 'be',
+        'have', 'has', 'had', 'do', 'does', 'did', 'some', 'any', 'all', 'new', 'old',
+        'business'
+    }
+    for w in re.findall(r'\b\w+\b', prompt.lower()):
+        if w not in strip_words and len(w) > 2:
+            clean_words.append(w)
+    
+    subject = " ".join(clean_words[:5])
+    if not subject:
+        subject = "HPCL Operations"
+        
+    return _title_case(subject)
+
+
 def _make_title(prompt: str, file_names: list,
                 intent: str = "informational",
                 file_data: dict = None,
                 doc_type: str = None) -> str:
     from llm_agent import query_llama
- 
+
     intent_hint = {
-        "analytical":    "This is an analytical/KPI report.",
-        "informational": "This is an informational document.",
-        "educational":   "This is an educational or training document.",
-        "policy":        "This is a policy or compliance document.",
-        "operational":   "This is an operational status report.",
-    }.get(intent, "")
- 
+        "analytical":    "analytical/KPI report",
+        "informational": "informational document",
+        "educational":   "educational or training document",
+        "policy":        "policy or compliance document",
+        "operational":   "operational status report",
+    }.get(intent, "document")
+
     content_lines = []
     if file_data:
         for fname, data in file_data.items():
@@ -788,105 +982,92 @@ def _make_title(prompt: str, file_names: list,
                     cols.extend(s.get("columns", []))
             else:
                 cols = data.get("columns", [])
- 
+
             text_preview = ""
             if data.get("type") == "text":
                 text_preview = data.get("content", "")[:300]
- 
+
             if cols:
-                content_lines.append(
-                    f"File: {clean} | Columns: {', '.join(cols[:12])}"
-                )
+                content_lines.append(f"File: {clean} | Columns: {', '.join(cols[:12])}")
             elif text_preview:
-                content_lines.append(
-                    f"File: {clean} | Content: {text_preview}"
-                )
+                content_lines.append(f"File: {clean} | Content: {text_preview}")
             else:
                 content_lines.append(f"File: {clean}")
- 
+
     content_context = "\n".join(content_lines)
- 
+
+    # Always use LLM to generate a professional title, with clear instructions to avoid prompt fragments
+    llm_prompt = (
+        f"You are a professional title generator for HPCL corporate documents.\n"
+        f"Generate a professional, concise title (5-8 words) based on the user's request and files.\n\n"
+        f"User Request: {prompt[:300]}\n"
+        f"Document Type: {doc_type or intent_hint}\n"
+    )
+    if content_context:
+        llm_prompt += f"Uploaded file details:\n{content_context}\n\n"
+
+    llm_prompt += (
+        "STRICT Rules for Title Generation:\n"
+        "- The title must be clean, professional, and directly reflect the subject of the document.\n"
+        "- NEVER include prompt instructions, persona instructions, or system prompts in the title (e.g., do NOT include 'Act As', 'Senior Management Consultant', 'Prepare', 'Draft', 'Create', etc.).\n"
+        "- Reply with ONLY the final title. Do NOT output quotes, explanations, markdown, or punctuation at the end."
+    )
+
     try:
-        if doc_type and doc_type in _OFFICIAL_DOC_TYPES:
-            doc_title_map = {
-                "file_note":          "File Note on ",
-                "office_memorandum":  "Office Memorandum: ",
-                "office_notice":      "Office Notice: ",
-                "circular":           "Circular on ",
-                "purchase_note":      "Purchase Note: ",
-                "office_order":       "Office Order: "
-            }
-            prefix = doc_title_map.get(doc_type, f"{doc_type.replace('_', ' ').title()}: ")
- 
-            # Extract subject directly from prompt for better accuracy
-            # Strip common command words to find the actual subject
-            strip_words = [
-                'generate', 'create', 'write', 'draft', 'make', 'produce',
-                'a', 'an', 'the', 'for', 'me', 'please', 'give',
-                'purchase note', 'procurement note', 'file note', 'office notice',
-                'office memorandum', 'circular', 'office order', 'office memo',
-                'o.m.', 'om', 'docx', 'pdf', 'pptx', 'in', 'format', 'on',
-            ]
-            subject_words = prompt.lower()
-            for sw in strip_words:
-                subject_words = subject_words.replace(sw, ' ')
-            subject_words = re.sub(r'\s+', ' ', subject_words).strip()
- 
-            # If we have a reasonable subject from the prompt, use it directly
-            if len(subject_words) > 5:
-                return f"{prefix}{_title_case(subject_words[:60])}"
- 
-            # Fallback to LLM for subject phrase
-            llm_prompt = (
-                f"Generate the subject/topic part of a professional document title for a '{doc_type}'.\n\n"
-                f"User request: {prompt[:300]}\n"
-                f"Rules:\n"
-                f"- Generate ONLY the subject phrase (e.g. 'Procurement of Network Switches' or 'Revision of Attendance Rules').\n"
-                f"- DO NOT include the document type name in your response.\n"
-                f"- Reply with ONLY the subject. No quotes, no markdown, no punctuation at end."
-            )
-            raw = query_llama(
-                llm_prompt,
-                output_type="plan",
-                has_files=bool(file_names)
-            )
-            subject_phrase = raw.strip().strip('"\'').strip('.')
-            return f"{prefix}{_title_case(subject_phrase)}"
- 
-        llm_prompt = (
-            f"Generate a short 5-7 word professional document title.\n\n"
-            f"User request: {prompt[:300]}\n"
-            f"Document type: {intent_hint}\n"
-        )
-        if content_context:
-            llm_prompt += f"Uploaded file details:\n{content_context}\n\n"
-        llm_prompt += (
-            "Rules:\n"
-            "- Title MUST reflect the actual content of the uploaded files.\n"
-            "- Sales data -> title mentions sales or revenue.\n"
-            "- HR/attrition data -> title mentions HR, workforce, or attrition.\n"
-            "- Inventory data -> title mentions inventory or operations.\n"
-            "- Informational text -> title reflects the specific topic of that text.\n"
-            "- NEVER produce 'HPCL Training Document', 'Employee Training Program',\n"
-            "  'KPI Dashboard', 'Learning Module', or 'Development Program'\n"
-            "  unless those exact words appear in the file content or user request.\n"
-            "- Only prefix with HPCL if the content is specifically about HPCL\n"
-            "  operations, performance, or internal data.\n"
-            "- Reply with ONLY the title. No quotes, no punctuation at end,\n"
-            "  no explanation, no markdown."
-        )
- 
         raw = query_llama(
             llm_prompt,
             output_type="plan",
             has_files=bool(file_names)
         )
         title = raw.strip().strip('"\'').strip('.')
-        return _title_case(title) if title else _fallback_title(prompt)
- 
+        # Remove any leading markdown formatting like '# Title:' or similar
+        title = re.sub(r'^#+\s*', '', title)
+        title = re.sub(r'^(title|document title):\s*', '', title, flags=re.IGNORECASE)
+        title = title.strip().strip('"\'').strip('.')
+        
+        # Ensure correct capitalization
+        title = _title_case(title)
+        
+        # Verify the title doesn't contain prompt fragments
+        forbidden_fragments = ["act as", "management consultant", "prepare a", "draft a", "generate a"]
+        if any(f in title.lower() for f in forbidden_fragments) or len(title) < 5:
+            raise ValueError("LLM title contained forbidden prompt fragments or was too short.")
+            
+        # Clean any prefix the LLM might have generated anyway
+        for key in ["file note", "office memorandum", "office notice", "circular", "purchase note", "office order"]:
+            title = re.sub(rf'^{key}\s*:?\s*', '', title, flags=re.IGNORECASE)
+        title = title.strip()
+        
+        # Prepend prefix if official doc type
+        if doc_type:
+            doc_title_map = {
+                "file_note":          "File Note: ",
+                "office_memorandum":  "Office Memorandum: ",
+                "office_notice":      "Office Notice: ",
+                "circular":           "Circular: ",
+                "purchase_note":      "Purchase Note: ",
+                "office_order":       "Office Order: "
+            }
+            if doc_type in doc_title_map:
+                title = f"{doc_title_map[doc_type]}{title}"
+                
+        return title
+
     except Exception as e:
-        logger.warning(f"Title LLM call failed ({e}), using fallback.")
-        return _fallback_title(prompt)
+        logger.warning(f"Title LLM call failed or returned bad title ({e}), using fallback.")
+        prefix = ""
+        if doc_type:
+            doc_title_map = {
+                "file_note":          "File Note: ",
+                "office_memorandum":  "Office Memorandum: ",
+                "office_notice":      "Office Notice: ",
+                "circular":           "Circular: ",
+                "purchase_note":      "Purchase Note: ",
+                "office_order":       "Office Order: "
+            }
+            prefix = doc_title_map.get(doc_type, f"{doc_type.replace('_', ' ').title()}: ")
+
+        return f"{prefix}{_fallback_title(prompt)}"
  
  
 def _sanitize(text: str, ext: str) -> str:

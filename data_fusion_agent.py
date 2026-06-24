@@ -451,38 +451,53 @@ def _fuse_numerics(
 # 7.  INSIGHT PRIORITISATION
 # ==============================================================================
  
+def _calculate_normalized_score(impact: int, confidence: int, entity_type: str) -> tuple[float, str]:
+    # Normalize inputs to 1-5
+    impact = max(1, min(5, int(impact)))
+    confidence = max(1, min(5, int(confidence)))
+    
+    # Relevance mapping (1-5)
+    relevance_map = {
+        "product": 5,
+        "department": 5,
+        "region": 5,
+        "location": 4,
+        "employee": 4,
+        "period": 2,
+        "vendor": 3,
+        "category": 3,
+        "role": 3,
+    }
+    relevance = relevance_map.get(entity_type.lower(), 3)
+    
+    score = impact * confidence * relevance
+    if score >= 75:
+        priority = "Critical"  # Top Priority
+    elif score >= 40:
+        priority = "High"      # High Priority
+    else:
+        priority = "Medium"    # Medium Priority
+        
+    return float(score), priority
+
+
 def _prioritise_insights(
     links: list[LinkRecord],
     fused: list[dict],
     file_data: dict,
     entity_map: dict,
 ) -> list[InsightRecord]:
-    """
-    Generate and rank cross-file insights.
- 
-    Priority score factors:
-        link confidence          (0 - 1.0)
-        entity importance weight (department/region rank higher than period)
-        numeric variance ratio   (high spread -> more interesting)
-        number of shared values  (more overlap -> more actionable)
-    """
-    _ENTITY_IMPORTANCE = {
-        "department": 1.0,  "region":     0.95, "location":   0.9,
-        "product":    0.85, "employee":   0.85, "customer":   0.8,
-        "vendor":     0.7,  "category":   0.7,  "role":       0.7,
-        "project":    0.65, "cost_center":0.65, "asset":      0.6,
-        "team":       0.6,  "period":     0.5,
-    }
- 
     insights: list[InsightRecord] = []
- 
+
     # -- Insight type A: link-level observations -------------------------------
     for link in links:
-        entity_weight = _ENTITY_IMPORTANCE.get(link.entity_type, 0.5)
-        score = (link.confidence * 0.5
-                 + entity_weight * 0.3
-                 + min(len(link.shared_values) / 10, 1.0) * 0.2)
- 
+        # base impact of 2, plus 1 if link confidence > 70%
+        impact = 3 if link.confidence >= 0.70 else 2
+        confidence = int(round(link.confidence * 5))
+        score, priority = _calculate_normalized_score(impact, confidence, link.entity_type)
+        
+        strength = "High" if priority in ("Critical", "High") else "Medium"
+        
         if link.shared_values:
             sample_vals = ", ".join(link.shared_values[:4])
             detail = (
@@ -490,15 +505,17 @@ def _prioritise_insights(
                 f"{len(link.shared_values)} common {link.entity_type} "
                 f"values (e.g. {sample_vals}). "
                 f"Link confidence: {link.confidence:.0%}. "
-                f"Analyse these shared {link.entity_type}s for correlated trends."
+                f"Analyse these shared {link.entity_type}s for correlated trends. "
+                f"(Insight Strength: {strength})"
             )
         else:
             detail = (
                 f"{link.file_a} and {link.file_b} both contain a "
                 f"{link.entity_type} dimension. "
-                f"Align reporting on this shared axis."
+                f"Align reporting on this shared axis. "
+                f"(Insight Strength: {strength})"
             )
- 
+
         title = (
             f"Cross-file {link.entity_type.title()} connection: "
             f"{link.file_a}  {link.file_b}"
@@ -506,12 +523,12 @@ def _prioritise_insights(
         insights.append(InsightRecord(
             title       = title,
             detail      = detail,
-            priority    = _score_to_priority(score),
+            priority    = priority,
             files       = [link.file_a, link.file_b],
             entity_type = link.entity_type,
-            score       = round(score, 3),
+            score       = score,
         ))
- 
+
     # -- Insight type B: numeric fusion observations & contradiction detection -
     for rec in fused:
         if not rec.get("is_canonical_match", True):
@@ -519,7 +536,6 @@ def _prioritise_insights(
         if not rec["numeric_summary"]:
             continue
 
-        entity_weight = _ENTITY_IMPORTANCE.get(rec["entity_type"], 0.5)
         keys = list(rec["numeric_summary"].keys())
         if len(keys) >= 2:
             key_a, key_b = keys[0], keys[1]
@@ -536,25 +552,30 @@ def _prioritise_insights(
             # Determine if values are contradictory or consistent
             if rel_diff > 0.15 and diff > 0.5:
                 title = f"Data Contradiction: {rec['entity_type'].title()} '{rec['entity_value']}' metric mismatch"
+                impact = 5 if rel_diff > 0.3 else 4
+                confidence = 4
+                score, priority = _calculate_normalized_score(impact, confidence, rec['entity_type'])
+                strength = "Very High" if priority == "Critical" else "High"
                 detail = (
                     f"Contradiction detected for {rec['entity_type']} '{rec['entity_value']}': "
                     f"'{key_a}' is {mean_a} in {rec['source_files'][0]}, but "
                     f"'{key_b}' is {mean_b} in {rec['source_files'][1]}. "
                     f"This is a variance of {diff:.1f} ({rel_diff:.1%}). "
-                    f"Investigate the data sources for reporting discrepancies."
+                    f"Investigate the data sources for reporting discrepancies. "
+                    f"(Insight Strength: {strength})"
                 )
-                priority = "Critical" if rel_diff > 0.3 else "High"
-                score = 0.5 + rel_diff * 0.5
             else:
                 title = f"Data Bridge: {rec['entity_type'].title()} '{rec['entity_value']}' numeric consistency"
+                impact = 3
+                confidence = 4
+                score, priority = _calculate_normalized_score(impact, confidence, rec['entity_type'])
                 detail = (
                     f"Consistent data found for {rec['entity_type']} '{rec['entity_value']}' across files: "
                     f"'{key_a}' is {mean_a} in {rec['source_files'][0]} and "
                     f"'{key_b}' is {mean_b} in {rec['source_files'][1]}. "
-                    f"This confirms alignment on this shared metric."
+                    f"This confirms alignment on this shared metric. "
+                    f"(Insight Strength: Medium)"
                 )
-                priority = "Medium"
-                score = 0.4 + (1.0 - rel_diff) * 0.2
                 
             insights.append(InsightRecord(
                 title       = title,
@@ -562,7 +583,7 @@ def _prioritise_insights(
                 priority    = priority,
                 files       = rec["source_files"],
                 entity_type = rec["entity_type"],
-                score       = round(score, 3),
+                score       = score,
             ))
 
     # -- Insight type C: Trend signals -----------------------------------------
@@ -577,19 +598,26 @@ def _prioritise_insights(
         for col, t in trends.items():
             if t.get("direction") in ("up", "down"):
                 title = f"Trend Signal: {fname} - {col} is trending {t['direction']}"
+                pct = abs(t.get("pct_change", 0))
+                impact = 5 if pct > 30 else 4 if pct > 15 else 3
+                confidence = 4
+                score, priority = _calculate_normalized_score(impact, confidence, "period")
+                strength = "High" if priority in ("Critical", "High") else "Medium"
+                
                 detail = (
                     f"In {fname}, metric '{col}' is {t['trend_signal']} "
-                    f"over period '{t['period_column']}'."
+                    f"over period '{t['period_column']}'. "
+                    f"(Insight Strength: {strength})"
                 )
                 insights.append(InsightRecord(
                     title       = title,
                     detail      = detail,
-                    priority    = "High" if abs(t["pct_change"]) > 15 else "Medium",
+                    priority    = priority,
                     files       = [fname],
                     entity_type = "period",
-                    score       = round(0.4 + min(abs(t["pct_change"]) / 100, 0.5), 3),
+                    score       = score,
                 ))
- 
+
     # -- Insight type D: Cross-file Correlation & Dependency Detection ---------
     # Group fused records by (file_a, file_b, ncol_a, ncol_b, entity_type)
     groups = defaultdict(list)
@@ -599,7 +627,6 @@ def _prioritise_insights(
             continue
         key_a, key_b = keys[0], keys[1]
         
-        # Strip suffix from key_a and key_b to get raw column names
         ncol_a = re.sub(r'_in_[a-f0-9]+$', '', key_a)
         ncol_b = re.sub(r'_in_[a-f0-9]+$', '', key_b)
         
@@ -610,7 +637,8 @@ def _prioritise_insights(
         groups[group_key].append(rec)
         
     for (file_a, file_b, ncol_a, ncol_b, etype), recs in groups.items():
-        if len(recs) < 3:
+        # Minimum sample check of 6 (prevent misleading correlations)
+        if len(recs) < 6:
             continue
             
         list_a = []
@@ -630,25 +658,30 @@ def _prioritise_insights(
                 list_b.append(mean_b)
                 val_names.append((r["entity_value"], mean_a, mean_b))
                 
-        if len(list_a) >= 3:
+        if len(list_a) >= 6:
             s_a = pd.Series(list_a)
             s_b = pd.Series(list_b)
             if s_a.std() > 0 and s_b.std() > 0:
                 r_coeff = s_a.corr(s_b)
                 if not pd.isna(r_coeff) and abs(r_coeff) >= 0.75:
                     direction_str = "positive" if r_coeff > 0 else "negative"
-                    priority = "Critical" if abs(r_coeff) >= 0.90 else "High"
+                    
+                    impact = int(round(abs(r_coeff) * 5))
+                    confidence = 5 if len(list_a) >= 12 else 4 if len(list_a) >= 8 else 3
+                    score, priority = _calculate_normalized_score(impact, confidence, etype)
+                    strength = "Very High" if abs(r_coeff) >= 0.90 else "High"
                     
                     samples = []
                     for val, ma, mb in val_names[:3]:
                         samples.append(f"'{val}' ({ncol_a}={ma:.1f}, {ncol_b}={mb:.1f})")
                     sample_str = ", ".join(samples)
                     
-                    title = f"Cross-file Correlation: '{ncol_a}' and '{ncol_b}' ({direction_str})"
+                    title = f"Cross-file Correlation: '{ncol_a}' and '{ncol_b}' ({r_coeff:.2f})"
                     detail = (
-                        f"A strong {direction_str} correlation of {r_coeff:.2f} was detected between "
+                        f"A Pearson correlation of {r_coeff:.2f} was detected between "
                         f"'{ncol_a}' in {file_a} and '{ncol_b}' in {file_b} across the shared '{etype}' dimension. "
-                        f"Sample pairings: {sample_str}."
+                        f"Sample pairings: {sample_str}. "
+                        f"(Insight Strength: {strength})"
                     )
                     
                     insights.append(InsightRecord(
@@ -657,20 +690,156 @@ def _prioritise_insights(
                         priority    = priority,
                         files       = [file_a, file_b],
                         entity_type = etype,
-                        score       = round(0.5 + abs(r_coeff) * 0.5, 3)
+                        score       = score,
                     ))
+
+    # -- Insight type E: In-Memory Inventory-Sales & Turnover Analyzer ----------
+    # Load DataFrames in memory from file_data to avoid disk IO
+    dfs = {}
+    for fname, data in file_data.items():
+        if "raw_df" in data:
+            dfs[fname] = data["raw_df"]
+        elif "sheets_df" in data:
+            dfs.update(data["sheets_df"])
+            
+    sales_df = None
+    inv_df = None
+    sales_file = None
+    inv_file = None
+
+    for name, df in dfs.items():
+        cols_lower = [str(c).lower() for c in df.columns]
+        is_sales = any(c in ["petrol", "diesel", "lpg", "lubricants"] or "revenue" in c for c in cols_lower)
+        is_inv = any("stock" in c or "inventory" in c or "issued" in c for c in cols_lower)
+        
+        if is_sales and not is_inv:
+            sales_df = df
+            sales_file = name
+        elif is_inv:
+            inv_df = df
+            inv_file = name
+            
+    if sales_df is not None and inv_df is not None:
+        sales_cols = {c.lower(): c for c in sales_df.columns}
+        inv_cols = {c.lower(): c for c in inv_df.columns}
+        
+        prod_col = next((c for c in inv_df.columns if "product" in c.lower()), None)
+        closing_col = next((inv_cols[c] for c in inv_cols if "closing" in c and "stock" in c), None)
+        issued_col = next((inv_cols[c] for c in inv_cols if "issued" in c or "dispatch" in c or "quantity_issued" in c), None)
+        
+        if prod_col and closing_col and issued_col:
+            grouped_inv = inv_df.groupby(prod_col).agg({
+                closing_col: 'mean',
+                issued_col: 'sum'
+            })
+            
+            grouped_inv['turnover'] = grouped_inv[issued_col] / grouped_inv[closing_col]
+            grouped_inv['daily_issued'] = grouped_inv[issued_col] / 30.0
+            grouped_inv['days_stock'] = grouped_inv[closing_col] / grouped_inv['daily_issued']
+            
+            prod_stats = {}
+            for prod, row in grouped_inv.iterrows():
+                p_lower = str(prod).strip().lower()
+                prod_stats[p_lower] = {
+                    "turnover": row['turnover'],
+                    "days_stock": row['days_stock'],
+                    "mean_closing": row[closing_col],
+                    "sum_issued": row[issued_col],
+                    "raw_name": str(prod)
+                }
+                
+            # Turnover Speed Insight
+            if "petrol" in prod_stats and "lpg" in prod_stats:
+                pet_to = prod_stats["petrol"]["turnover"]
+                lpg_to = prod_stats["lpg"]["turnover"]
+                if lpg_to > 0:
+                    ratio = pet_to / lpg_to
+                    score, priority = _calculate_normalized_score(4, 5, "product")
+                    title = "Inventory Turnover Speed Discrepancy"
+                    detail = (
+                        f"Petrol inventory turnover ratio is {ratio:.1f}x faster than LPG "
+                        f"(Petrol turnover: {pet_to:.2f}, LPG turnover: {lpg_to:.2f}). "
+                        f"This indicates much faster stock clearance for Petrol compared to LPG. "
+                        f"(Insight Strength: High)"
+                    )
+                    insights.append(InsightRecord(
+                        title=title, detail=detail, priority=priority,
+                        files=[inv_file], entity_type="product", score=score
+                    ))
+                    
+            # Days of Stock Demand Coverage Insights
+            for p_lower, stats in prod_stats.items():
+                days = stats["days_stock"]
+                if days > 0:
+                    score, priority = _calculate_normalized_score(3, 5, "product")
+                    title = f"Product Demand Coverage: {stats['raw_name']}"
+                    detail = (
+                        f"{stats['raw_name']} closing stock covers approximately {days:.1f} days of demand "
+                        f"(based on average daily issued quantity of {stats['sum_issued']/30.0:.1f} units). "
+                        f"(Insight Strength: Medium)"
+                    )
+                    insights.append(InsightRecord(
+                        title=title, detail=detail, priority=priority,
+                        files=[inv_file], entity_type="product", score=score
+                    ))
+                    
+            # Stock Contribution vs Sales Volume Share Imbalance
+            sales_p_cols = {}
+            for col in sales_df.columns:
+                col_l = col.lower()
+                for p in ["petrol", "diesel", "lpg", "lubricants"]:
+                    if p in col_l:
+                        sales_p_cols[p] = col
+                        
+            stock_totals = grouped_inv[closing_col]
+            total_stock_all = stock_totals.sum()
+            
+            sales_totals = {}
+            for p, col in sales_p_cols.items():
+                sales_totals[p] = sales_df[col].sum()
+            total_sales_all = sum(sales_totals.values())
+            
+            if total_stock_all > 0 and total_sales_all > 0:
+                for p in ["petrol", "diesel", "lpg", "lubricants"]:
+                    inv_match_key = next((idx for idx in stock_totals.index if p in str(idx).lower()), None)
+                    if inv_match_key and p in sales_totals:
+                        stock_share = stock_totals[inv_match_key] / total_stock_all
+                        sales_share = sales_totals[p] / total_sales_all
+                        
+                        if stock_share > sales_share + 0.10:
+                            # Potential overstock! Compare growth percentages
+                            sales_col_name = sales_p_cols[p]
+                            sales_vals = sales_df[sales_col_name].dropna().tolist()
+                            sales_growth = 0.0
+                            if len(sales_vals) >= 2 and sales_vals[0] > 0:
+                                sales_growth = (sales_vals[-1] - sales_vals[0]) / sales_vals[0] * 100.0
+                                
+                            time_col = next((inv_cols[c] for c in inv_cols if "month" in c or "period" in c or "date" in c), None)
+                            stock_growth = 0.0
+                            if time_col:
+                                p_rows = inv_df[inv_df[prod_col] == inv_match_key].sort_values(by=time_col)
+                                if len(p_rows) >= 2:
+                                    stock_vals = p_rows[closing_col].dropna().tolist()
+                                    if stock_vals[0] > 0:
+                                        stock_growth = (stock_vals[-1] - stock_vals[0]) / stock_vals[0] * 100.0
+                                        
+                            score, priority = _calculate_normalized_score(5, 5, "product")
+                            title = f"Potential Overstock Risk: {inv_match_key}"
+                            detail = (
+                                f"{inv_match_key} contributes {stock_share:.1%} of total closing stock, but only "
+                                f"{sales_share:.1%} of sales volume. Potential overstock risk detected because "
+                                f"{inv_match_key} closing stock grew by {stock_growth:.1f}% while sales grew by only "
+                                f"{sales_growth:.1f}%. (Insight Strength: Very High)"
+                            )
+                            insights.append(InsightRecord(
+                                title=title, detail=detail, priority=priority,
+                                files=[inv_file, sales_file], entity_type="product", score=score
+                            ))
 
     # Sort: Critical -> High -> Medium -> Low, then by score desc
     _ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-    insights.sort(key=lambda i: (_ORDER[i.priority], -i.score))
+    insights.sort(key=lambda i: (_ORDER.get(i.priority, 3), -i.score))
     return insights
- 
- 
-def _score_to_priority(score: float) -> str:
-    if score >= 0.75:   return "Critical"
-    if score >= 0.55:   return "High"
-    if score >= 0.35:   return "Medium"
-    return "Low"
  
  
 # ==============================================================================
@@ -736,7 +905,7 @@ def _render_context(
     # Fused numeric summaries
     if fused:
         lines.append(f"\nCROSS-FILE NUMERIC SUMMARIES ({len(fused)} records):")
-        for rec in fused[:12]:
+        for rec in fused[:2]:
             lines.append(
                 f"\n  [{rec['entity_type'].upper()}: {rec['entity_value']}]"
                 f"  sources: {' + '.join(rec['source_files'])}"
@@ -752,7 +921,7 @@ def _render_context(
     # Prioritised insights
     if insights:
         lines.append(f"\nPRIORITISED CROSS-FILE INSIGHTS ({len(insights)} total):")
-        for ins in insights[:10]:
+        for ins in insights[:3]:
             lines.append(f"\n  [{ins.priority.upper()}] {ins.title}")
             lines.append(f"    {ins.detail}")
  

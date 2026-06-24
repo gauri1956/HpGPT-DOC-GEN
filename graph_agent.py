@@ -119,16 +119,69 @@ def generate_charts_from_data(data, instruction=""):
     return chart_images
  
  
+def _generate_grouped_line_chart(group, file_name):
+    # Find the labels (from the first column in the group)
+    first_col = group['columns'][0]
+    labels = [str(l) for l in first_col['labels']]
+    
+    # Build values dict: {entity_name: values}
+    values_dict = {}
+    for entity, c in zip(group['entities'], group['columns']):
+        values_dict[entity] = [float(v) for v in c['values']]
+        
+    suffix_clean = _fix_abbrev_casing(group['suffix'])
+    title = f"Monthly Sales Comparison ({suffix_clean})" if "sales" in group['suffix'].lower() else f"Monthly comparison of {suffix_clean}"
+    if file_name and "omc" in file_name.lower():
+        title = "Monthly Sales Comparison (HPCL vs BPCL vs IOCL vs Reliance vs Nayara)"
+        
+    y_label = _fix_abbrev_casing(group['suffix'].title())
+    
+    try:
+        result = generate_chart(
+            chart_type='line',
+            labels=labels,
+            values=values_dict,  # Pass the dict here!
+            title=title,
+            y_label=y_label
+        )
+        if 'path' in result:
+            sig = tuple(round(sum(vals), 2) for vals in values_dict.values())
+            return (title, result['path'], sig)
+    except Exception as e:
+        logger.warning(f"Grouped line chart failed: {e}")
+    return None
+ 
+ 
 def _charts_from_candidates(candidates, file_name):
     chart_images = []
     if not candidates:
         logger.info(f"No chart candidates in {file_name}")
         return chart_images
  
+    # First, find comparable groups
+    groups = _find_comparable_groups(candidates)
+    grouped_cols = set()
+    
+    # Generate grouped line charts for time-series siblings
+    for group in groups:
+        label_col = group['label_col'].lower()
+        is_time_series = any(x in label_col for x in ('month', 'date', 'year', 'period', 'quarter', 'week', 'day'))
+        
+        if is_time_series:
+            grouped_chart = _generate_grouped_line_chart(group, file_name)
+            if grouped_chart:
+                chart_images.append(grouped_chart)
+                # Mark these columns as grouped so we don't generate individual charts for them
+                for c in group['columns']:
+                    grouped_cols.add(c['value_col'])
+ 
     for c in candidates[:8]:   # up to 8 individual charts
+        vcol = c['value_col']
+        if vcol in grouped_cols:
+            continue
+ 
         labels = [str(l) for l in c['labels']]
         values = [float(v) for v in c['values']]
-        vcol = c['value_col']
         label_col = c['label_col']
  
         title = _readable_label(vcol)
@@ -150,9 +203,11 @@ def _charts_from_candidates(candidates, file_name):
         except Exception as e:
             logger.warning(f"Chart generation failed for {title}: {e}")
  
-    # One extra chart comparing "siblings" — same metric/unit, different
-    # entities — if this file's candidates contain such a group.
-    chart_images.extend(_comparable_groups_chart(candidates, file_name))
+    # One extra chart comparing averages (bar chart)
+    # Only run it for groups that weren't already plotted as time-series line charts
+    non_time_series_candidates = [c for c in candidates if c['value_col'] not in grouped_cols]
+    if non_time_series_candidates:
+        chart_images.extend(_comparable_groups_chart(non_time_series_candidates, file_name))
  
     return chart_images
  
