@@ -153,6 +153,86 @@ _INSIGHT_INTENT_INSTRUCTIONS = {
         "-> Variance Analysis -> Segment Analysis -> Risk Assessment -> Forward Outlook\n"
         "-> Priority Actions. Every variance must state the root cause.\n"
     ),
+ 
+    # -- Official PSU/Government document intents --
+    "file_note": (
+        "DOCUMENT INTENT -- FILE NOTE (Official PSU/Government Document):\n"
+        "This is a formal internal noting document used for decision-making in HPCL.\n"
+        "Do NOT write an analytical report, executive summary, or KPI dashboard.\n"
+        "Follow the official File Note format exactly as specified in the format block above.\n"
+        "Use formal government language. Number every paragraph. End with Approval Sought.\n"
+        "Every section MUST have substantive numbered paragraphs -- not one-liners.\n"
+    ),
+    "office_memorandum": (
+        "DOCUMENT INTENT -- OFFICE MEMORANDUM / O.M. (Official PSU/Government Document):\n"
+        "This is a formal inter-departmental communication document.\n"
+        "Do NOT write a report or essay. Follow the official O.M. format exactly.\n"
+        "Open with 'The undersigned is directed to...' and use numbered paragraphs.\n"
+        "The Body section must have at least 3 substantive numbered paragraphs.\n"
+    ),
+    "office_notice": (
+        "DOCUMENT INTENT -- OFFICE NOTICE (Official PSU/Government Document):\n"
+        "This is a formal notice to staff or departments.\n"
+        "Do NOT write a report or essay. Follow the official Notice format exactly.\n"
+        "Open with 'It is hereby notified that...' and use numbered points.\n"
+        "The Notice Body must contain at least 4 numbered directives or information points.\n"
+    ),
+    "circular": (
+        "DOCUMENT INTENT -- OFFICE CIRCULAR (Official PSU/Government Document):\n"
+        "This is a formal policy/procedure circular issued to all departments.\n"
+        "Do NOT write a report or essay. Follow the official Circular format exactly.\n"
+        "Use numbered instructions in the Instructions section -- minimum 5 instructions.\n"
+        "State effective date and issuing authority explicitly.\n"
+    ),
+    "purchase_note": (
+        "DOCUMENT INTENT -- PURCHASE / PROCUREMENT NOTE (Official PSU/Government Document):\n"
+        "\n"
+        "This is a PROCUREMENT JUSTIFICATION document. It must read as a complete,\n"
+        "professionally written government procurement noting -- not a template or form.\n"
+        "\n"
+        "MANDATORY CONTENT REQUIREMENTS:\n"
+        "- Section 1 (Purpose and Operational Requirement): Write 3-5 numbered paragraphs\n"
+        "  explaining exactly WHY this item/service is needed, which operational gap it fills,\n"
+        "  which department/process uses it, what the current situation is without it, and\n"
+        "  how it aligns with HPCL's operational objectives. Be specific and substantive.\n"
+        "\n"
+        "- Section 2 (Specification of Items): Provide a complete markdown table with\n"
+        "  columns: S.No | Item/Service Description | Technical Specification | Quantity |\n"
+        "  Est. Unit Cost (Rs.) | Total Est. Cost (Rs.).\n"
+        "  Use 'Rs. __________________' for unknown costs.\n"
+        "\n"
+        "- Section 3 (Operational Justification and Risk of Non-Procurement): Write 3-5\n"
+        "  numbered paragraphs explaining WHY these specific specifications are required,\n"
+        "  what alternatives were considered and rejected, and what SPECIFIC operational,\n"
+        "  safety, compliance, or financial risks arise if this procurement is NOT approved.\n"
+        "\n"
+        "- Section 4 (Budget Provision): Write 2-3 numbered paragraphs on the budget head,\n"
+        "  sanctioned budget, and estimated expenditure. Use 'Rs. __________________' for unknowns.\n"
+        "\n"
+        "- Section 5 (Procurement Method): Name and justify the recommended procurement\n"
+        "  method (Open Tender / Limited Tender / Single Source / GeM / Rate Contract).\n"
+        "  Reference GFR 2017 or HPCL procurement guidelines.\n"
+        "\n"
+        "- Section 6 (Delivery Schedule): State expected timeline and milestones.\n"
+        "\n"
+        "- Section 7 (Recommendation and Approval Sought): Write a formal recommendation\n"
+        "  paragraph and state EXACTLY what sanction/approval is being sought.\n"
+        "  End with the full approval chain: Prepared by / Recommended by / Approved by.\n"
+        "\n"
+        "STYLE RULES:\n"
+        "- Every section must use numbered paragraphs (1., 2., 3.) -- NO bullet points.\n"
+        "- Use formal government prose throughout.\n"
+        "- Use 'the undersigned', 'it is submitted', 'competent authority' etc.\n"
+        "- Unknown values: use '__________________' underlines, never brackets.\n"
+        "- Do NOT invent specific costs, quantities, person names, or reference numbers.\n"
+    ),
+    "office_order": (
+        "DOCUMENT INTENT -- OFFICE ORDER (Official PSU/Government Document):\n"
+        "This is a formal order issued by competent authority.\n"
+        "Do NOT write a report or essay. Follow the official Office Order format exactly.\n"
+        "Open with 'It is ordered that...' and number all paragraphs.\n"
+        "The Order section must have at least 3 numbered paragraphs.\n"
+    ),
 }
  
  
@@ -162,13 +242,11 @@ def _build_digest_prompt(intent: str) -> str:
     return _BASE_DIGEST_PROMPT.strip() + "\n\n" + intent_block.strip()
  
  
-def run_analysis(data, instruction, intent: str = None):
+def run_analysis(data, instruction, intent: str = None, dataset_role: str = None,
+                 causal_hints: list = None):
     """
     Extract a fact-digest from a single dataset. Output is bullet points with
     real numbers (and optional chart markers) -- no report structure.
- 
-    intent: if not passed, detected automatically from data.
-            detect_content_intent() returns (intent, confidence) -- we unpack it.
  
     Returns: (digest_text, intent)
     """
@@ -181,23 +259,43 @@ def run_analysis(data, instruction, intent: str = None):
         data = {**data, 'file': clean_name}
  
     if intent is None:
-        # FIX: detect_content_intent now returns (intent, confidence) tuple
         intent, confidence = detect_content_intent(data, user_prompt=instruction)
         logger.info(
             f"Detected intent for {data.get('file', 'unknown')}: "
             f"{intent} (confidence={confidence})"
         )
-    # If intent was passed in as a string by the orchestrator, use it directly
  
     digest_prompt = _build_digest_prompt(intent)
     data_summary  = json.dumps(data, indent=2, default=str)[:5000]
  
-    prompt = (
+    prompt_lines = [
         f"Instruction (for context only -- see rules above about ignoring its "
-        f"structure): {instruction}\n\n"
-        f"Dataset: {data.get('file', 'unknown')}\n\n"
-        f"Data:\n{data_summary}"
-    )
+        f"structure): {instruction}",
+        f"Dataset: {data.get('file', 'unknown')}"
+    ]
+ 
+    if dataset_role:
+        prompt_lines.append(f"Dataset Role: {dataset_role}")
+ 
+    if causal_hints:
+        hints_str = "\n".join(f"- {h}" for h in causal_hints)
+        prompt_lines.append(f"Causal Hints / Expected Relationships:\n{hints_str}")
+ 
+    trend_lines = []
+    if isinstance(data, dict):
+        trends = data.get("trends", {})
+        if trends:
+            for col, t in trends.items():
+                trend_lines.append(f"  - Column '{col}': {t.get('trend_signal', '')}")
+ 
+    if trend_lines:
+        prompt_lines.append(
+            "Detected Chronological Trend Directions (MUST be preserved and directly cited in your analysis):\n"
+            + "\n".join(trend_lines)
+        )
+ 
+    prompt_lines.append(f"Data:\n{data_summary}")
+    prompt = "\n\n".join(prompt_lines)
  
     result = query_llama(prompt, output_type="pdf", system_override=digest_prompt)
     logger.info(f"Digest complete for: {data.get('file', 'unknown')} (intent={intent})")
@@ -206,25 +304,22 @@ def run_analysis(data, instruction, intent: str = None):
  
  
 def run_insight(all_results, user_prompt, output_format="pdf",
-                doc_type: str = None, cross_file_context: str = ""):
+                doc_type: str = None, cross_file_context: str = "",
+                official_format_spec: str = None):
     """
     Build the SINGLE integrated report from all per-file digests.
  
+    KEY FIX: When official_format_spec is present, doctype_rules are NOT
+    injected separately -- doing so caused duplicate structure injection
+    which confused the LLM and produced template-like output for Purchase Notes.
+ 
     Args:
-        all_results        : list of (digest_text, intent) tuples from run_analysis(),
-                             or list of plain strings (legacy fallback).
-        user_prompt        : original user request string.
-        output_format      : "docx" | "pdf" | "pptx"
-        doc_type           : document type detected upstream (e.g. "business_report",
-                             "training_material", "sop"). Overrides intent-based
-                             output structure when provided.
-        cross_file_context : text block produced by DataFusionAgent containing
-                             shared entity links, confidence scores, numeric
-                             summaries, and prioritised insights. When non-empty,
-                             it is prepended to the LLM prompt so the model sees
-                             cross-file intelligence BEFORE the per-file digests.
-                             Also triggers injection of _CROSS_FILE_RULES into
-                             the prompt so the LLM knows it MUST address them.
+        all_results          : list of (digest_text, intent) tuples from run_analysis()
+        user_prompt          : original user request string
+        output_format        : "docx" | "pdf" | "pptx"
+        doc_type             : detected document type
+        cross_file_context   : text block produced by DataFusionAgent
+        official_format_spec : format spec from _resolve_official_format()
  
     Returns: (report_text, dominant_intent)
     """
@@ -241,13 +336,26 @@ def run_insight(all_results, user_prompt, output_format="pdf",
     )
     logger.info(f"Dominant intent for integrated report: {dominant_intent}")
  
-    # doc_type takes precedence for output structure; intent drives data treatment
     effective_type = doc_type or dominant_intent
  
-    # Get output structure rules -- doc_type-specific if available, else intent-based
-    doctype_rules = get_doctype_rules(effective_type)
+    # -- FIX: Only inject doctype_rules when official_format_spec is NOT present.
+    # For official doc types, the format spec already contains the full structure.
+    # Injecting doctype_rules ON TOP of official_format_spec causes the LLM to
+    # see the same structure twice with minor wording differences -> confused output.
+    is_official = effective_type in {
+        "file_note", "office_memorandum", "office_notice",
+        "circular", "purchase_note", "office_order"
+    }
  
-    # Get narrative intent instruction for how to USE the data
+    if official_format_spec and is_official:
+        # Official doc: use format spec ONLY -- no separate doctype_rules
+        doctype_rules = ""
+        logger.info(f"[run_insight] Official doc type '{effective_type}': skipping separate doctype_rules injection.")
+    else:
+        # Standard doc: use doctype_rules as usual
+        doctype_rules = get_doctype_rules(effective_type)
+ 
+    # Get narrative intent instruction
     intent_instruction = _INSIGHT_INTENT_INSTRUCTIONS.get(
         effective_type,
         _INSIGHT_INTENT_INSTRUCTIONS.get(
@@ -265,24 +373,33 @@ def run_insight(all_results, user_prompt, output_format="pdf",
     # -- Build the full prompt -------------------------------------------------
     # Structure:
     #   1. User request
-    #   2. Cross-file intelligence context (if present) -- entity links,
-    #      prioritised insights, shared dimensions, numeric summaries
-    #   3. Cross-file rules (if context present) -- forces LLM to act on it
-    #   4. Intent instruction -- how to treat the data
-    #   5. Doc-type structure rules -- what sections to write
-    #   6. Per-file digests -- the actual facts
+    #   2. Official format spec (if present) -- MANDATORY structure for PSU doc types
+    #   3. Cross-file intelligence context (if present)
+    #   4. Cross-file rules (if context present)
+    #   5. Intent instruction -- how to treat the data
+    #   6. Doc-type structure rules -- ONLY if not official (to avoid duplication)
+    #   7. Data grounding instructions
+    #   8. Per-file digests
  
     prompt_parts = [user_prompt.strip()]
  
+    # Inject official format spec FIRST so LLM sees the mandatory structure
+    if official_format_spec and official_format_spec.strip():
+        prompt_parts.append(official_format_spec.strip())
+        logger.info(
+            f"[run_insight] Official format spec injected "
+            f"({len(official_format_spec)} chars) for doc_type='{effective_type}'."
+        )
+    else:
+        logger.info(f"[run_insight] No official format spec -- standard generation.")
+ 
     if cross_file_context and cross_file_context.strip():
-        # Inject fusion context FIRST so the LLM sees relationships before facts
         prompt_parts.append(
             "================================================\n"
             "CROSS-FILE INTELLIGENCE -- READ THIS FIRST\n"
             "================================================\n"
             + cross_file_context.strip()
         )
-        # Inject cross-file rules so the LLM knows it MUST use this context
         prompt_parts.append(get_cross_file_rules())
         logger.info(
             f"[run_insight] Cross-file context injected "
@@ -292,17 +409,37 @@ def run_insight(all_results, user_prompt, output_format="pdf",
         logger.info("[run_insight] No cross-file context -- single-file or fusion skipped.")
  
     prompt_parts.append(intent_instruction)
-    prompt_parts.append(doctype_rules)
  
-    prompt_parts.append(
-        f"You have been given fact-digests extracted from {len(digests)} "
-        f"dataset(s) below. Each digest contains real numbers taken directly from "
-        f"the underlying data (or simple calculations from those numbers). Use ONLY "
-        f"these facts and numbers -- do not invent, estimate, or assume any additional "
-        f"figures beyond what is given or directly derivable from them. Write ONE "
-        f"integrated document covering all datasets together, following the document "
-        f"type structure and formatting rules above."
-    )
+    # Only inject doctype_rules for non-official docs
+    if doctype_rules:
+        prompt_parts.append(doctype_rules)
+ 
+    # Data grounding instruction
+    if is_official and digests and any(d.strip() for d in digests):
+        # For official docs with uploaded files, tell LLM to use the file facts
+        prompt_parts.append(
+            f"The following fact-digests were extracted from {len(digests)} uploaded file(s). "
+            f"Incorporate any relevant facts, specifications, quantities, or figures from these "
+            f"digests into the appropriate sections of the document. Do NOT invent data, but DO "
+            f"use whatever is provided here to make the document more specific and substantive.\n"
+            f"If no relevant data is present, generate realistic HPCL-appropriate content based "
+            f"on the subject matter of the document."
+        )
+    elif not is_official:
+        prompt_parts.append(
+            f"You have been given fact-digests extracted from {len(digests)} "
+            f"dataset(s) below. Each digest contains real numbers taken directly from "
+            f"the underlying data (or simple calculations from those numbers). Use ONLY "
+            f"these facts and numbers -- do not invent, estimate, or assume any additional "
+            f"figures beyond what is given or directly derivable from them. "
+            f"Specifically:\n"
+            f"- Do NOT invent KPIs, compliance rates, percentages, forecasts, or risk scores.\n"
+            f"- Present assumptions explicitly as assumptions, never as verified facts.\n"
+            f"- PRESERVE TREND DIRECTIONS: Strictly preserve all trend directions shown in the digests.\n"
+            f"- COMPATIBLE METRICS ONLY: Never compare metrics with incompatible units.\n"
+            f"- Write ONE integrated document covering all datasets together, following the document "
+            f"type structure and formatting rules above."
+        )
  
     prompt_parts.append(combined)
  
@@ -312,15 +449,16 @@ def run_insight(all_results, user_prompt, output_format="pdf",
         prompt,
         output_type=output_format,
         has_files=True,
-        is_combined=True
+        is_combined=True,
+        doc_type=effective_type
     )
  
     logger.info(
         f"Integrated {output_format} report complete "
         f"({len(digests)} dataset(s), intent={dominant_intent}, "
         f"doc_type={effective_type}, "
-        f"fusion_context={'yes' if cross_file_context else 'no'})"
+        f"fusion_context={'yes' if cross_file_context else 'no'}, "
+        f"official_format={'yes' if official_format_spec else 'no'})"
     )
  
     return result, dominant_intent
- 

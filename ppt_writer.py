@@ -257,7 +257,7 @@ def _add_kpi_dashboard_slide(sl, bullets):
                                     left, top, tile_w, tile_h)
         tile.fill.solid()
         tile.fill.fore_color.rgb = LIGHT_BG
-        tile.line.solid()
+        #tile.line.solid()
         tile.line.color.rgb = HP_BLUE
         tile.line.width = Pt(1.5)
         _no_shadow(tile)

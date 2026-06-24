@@ -95,24 +95,22 @@ _GROUNDING_RULES = (
     "- Every dataset provided must be referenced by at least one specific statistic\n"
     "  somewhere in the document.\n"
  
-    "\n-- CONTENT PRIORITIZATION -- CRITICAL:\n"
+    "\n-- CONTENT PRIORITIZATION & ROADMAPS -- CRITICAL:\n"
     "- Identify the 3-5 most important concepts or findings. Give them the most coverage.\n"
     "- Minor details must NOT receive equal weight to critical findings.\n"
     "- Compliance, safety, operational risk, and strategic items always rank above background.\n"
+    "- You MUST include a structured 'Implementation Roadmap' table at the end of the recommendations section with columns: | Action Item | Priority (Critical/High/Medium) | Responsible Function | Timeline (30 / 60 / 90 Days) | Target Success Metric |.\n"
  
-    "\n-- DEPTH OVER SUMMARY -- CRITICAL:\n"
-    "- Do NOT merely list facts. For every key finding: state it -> explain WHY it matters\n"
-    "  -> describe its business impact -> state what action follows.\n"
-    "- Every major section must answer: What happened Why Why does it matter\n"
-    "  What risks exist What must be done\n"
+    "\n-- DEPTH OVER SUMMARY & ANALYSIS OVER DESCRIPTION -- CRITICAL:\n"
+    "- Do NOT merely list or describe facts. For every key finding: state it -> explain WHY it matters -> describe its operational/business impact -> state what action follows.\n"
+    "- Every major section must answer: What happened? Why? Why does it matter? What risks exist? What must be done?\n"
+    "- Avoid plain description (e.g. 'The department has X units'). Turn it into strategic analysis (e.g. 'The department's capacity of X units limits throughput by Y%, creating an operational bottleneck during peak periods').\n"
  
-    "\n-- STRATEGIC THINKING -- CRITICAL:\n"
-    "- For every metric or trend you identify, answer: what does this mean for\n"
-    "  HPCL's competitive position, profitability, or operational risk\n"
-    "- Every section must connect its findings to a business consequence:\n"
-    "  revenue impact, cost exposure, risk rating, or strategic opportunity.\n"
-    "- Ask yourself: if a board member read only this section, would they know\n"
-    "  what decision to make If not, rewrite until the answer is yes.\n"
+    "\n-- STRATEGIC THINKING & HPCL SECTOR CONTEXT -- CRITICAL:\n"
+    "- For every metric or trend you identify, answer: what does this mean for HPCL's competitive market position, cost optimization, refinery/logistics margin, or operational safety compliance?\n"
+    "- Every section must connect its findings to a business consequence: refinery margin impact, supply-chain exposure, PSU compliance rating, or strategic market opportunity.\n"
+    "- Frame all analyses within downstream petroleum marketing, refining, terminal logistics, and public sector enterprise (PSU) paradigms.\n"
+    "- Ask yourself: if a board member read only this section, would they know what decision to make? If not, rewrite until the answer is yes.\n"
  
     "\n-- ROOT-CAUSE ANALYSIS -- CRITICAL:\n"
     "- Never stop at the symptom. For every problem identified, write one sentence\n"
@@ -152,13 +150,9 @@ _GROUNDING_RULES = (
     "  happen if this trend continues, or what opportunity is at risk of being missed.\n"
  
     "\n-- SPECIFICITY -- no generic consulting filler -- CRITICAL:\n"
-    "- Every recommendation must name a SPECIFIC metric, entity, and its actual\n"
-    "  value, gap, or trend from the provided data.\n"
-    "- Generic statements like 'improve employee engagement' or 'enhance training\n"
-    "  programs' are FORBIDDEN unless followed immediately by: which specific\n"
-    "  segment, by how much, compared to what baseline, and why that number.\n"
-    "- Self-check: could this sentence appear in a report for a completely different\n"
-    "  company without changing a single word If yes, rewrite it with specific data.\n"
+    "- Every recommendation must name a SPECIFIC metric, entity, and its actual value, gap, or trend from the provided data. Generic or generic-industry filler is strictly forbidden.\n"
+    "- Generic statements like 'improve employee engagement' or 'enhance training programs' or 'maximize sales' are FORBIDDEN. Instead, recommendations must specify the target segment, specific baseline vs target metrics, and sector-specific execution steps (e.g. 'upgrade pipeline monitoring tools to reduce downtime by X% in terminal Y').\n"
+    "- Self-check: could this sentence appear in a report for a completely different company or sector without changing a single word? If yes, rewrite it with specific, HPCL-relevant downstream petroleum context and numbers.\n"
  
     "\n-- HEADLINE INSIGHT -- CRITICAL:\n"
     "- Identify the single largest gap, trend, risk, or opportunity visible across\n"
@@ -167,16 +161,20 @@ _GROUNDING_RULES = (
     "- This headline insight must be the FIRST substantive statement in the\n"
     "  Executive Summary, stated in plain language a director can act on.\n"
  
-    "\nNO INVENTED METRICS -- CRITICAL:\n"
-    "- NEVER state a specific numeric value for ANY metric unless it is either:\n"
-    "  (a) given directly in a dataset summary in the input, OR\n"
-    "  (b) a simple arithmetic derivation of numbers that ARE in the dataset.\n"
-    "- Qualitative root-cause and strategic language is always permitted --\n"
-    "  only invented NUMBERS are forbidden.\n"
+    "\nNO INVENTED METRICS, TARGETS, OR FORECASTS -- CRITICAL:\n"
+    "- NEVER state a specific numeric value, KPI target, compliance rate, variance, or forecast percentage unless it is either:\n"
+    "  (a) given directly in the input dataset summaries, OR\n"
+    "  (b) a simple arithmetic derivation of numbers that ARE in the dataset (which you must show via calculation, e.g., 'Actual 15 - Budget 10 = Variance 5').\n"
+    "- Do NOT invent quantitative targets, compliance thresholds, or future percentage gains. Present any recommendation as a qualitative guideline rather than an assumed factual target.\n"
+    "- For every numeric metric, target, or forecast you write, ensure there is strict evidence grounding in the source files. Speculating or fabricating figures is strictly forbidden.\n"
  
     "\nCONSISTENCY CHECK -- CRITICAL:\n"
     "- Do not write generic findings unless they are TRUE for the specific numbers\n"
     "  provided. Compare actual values before stating any directional conclusion.\n"
+    "\nCOMPATIBLE METRIC COMPARISONS -- CRITICAL:\n"
+    "- NEVER compare or combine metrics with incompatible units or dimensions (e.g. do not compare Sales in KL to Revenue in INR Lakh, or Headcount to Attrition Rate). Ensure comparisons only occur on mathematically compatible units and comparable time scales.\n"
+    "\nPRESERVE TREND SIGNALS -- CRITICAL:\n"
+    "- You MUST strictly preserve all trend directions (up, down, stable/flat) identified in the data digests and cross-file insights. Never describe a decreasing metric as increasing or stable, and vice versa.\n"
  
     "\nINTEGRATED NARRATIVE -- CRITICAL:\n"
     "- Do not treat each dataset as its own mini-report. Connect findings ACROSS\n"
@@ -188,31 +186,15 @@ _SHARED_RULES = _CORE_RULES + _GROUNDING_RULES
  
 # -- Data rules for NOINPUT prompts -------------------------------------------
 _NOINPUT_DATA_RULES = (
-    "\nDATA RULES FOR ILLUSTRATIVE REPORTS -- CRITICAL:\n"
-    "- No real dataset has been provided. You are generating a realistic illustrative\n"
-    "  report. You MUST invent plausible, internally consistent figures appropriate\n"
-    "  for an HPCL HR/operational document.\n"
-    "- ALL bullets and sentences must be fully written with a concrete number or\n"
-    "  finding. A bullet that is missing its number is a CRITICAL ERROR.\n"
-    "- Every number you write must be self-consistent across the entire document.\n"
-    "- Use realistic, domain-appropriate units:\n"
-    "    * Training: hours per employee per year (e.g. 32 hours/employee)\n"
-    "    * Salary: INR Lakh per annum (e.g. 8.5 INR Lakh p.a.)\n"
-    "    * Headcount: whole numbers\n"
-    "    * Attrition, satisfaction, completion: percentages\n"
-    "    * Recruitment: days for time-to-hire, whole numbers for headcount\n"
-    "- NEVER use nonsensical units (e.g. KL for training investment).\n"
-    "- For every metric you state, follow it immediately with one sentence explaining\n"
-    "  its business consequence for HPCL (cost, risk, or opportunity).\n"
-    "- The Executive Summary must answer in order:\n"
-    "  1. What is the single most important issue right now\n"
-    "  2. Why is it happening (root cause in one sentence)\n"
-    "  3. What must leadership do about it in the next 90 days\n"
-    "- Each ## section must end with a forward-looking sentence.\n"
-    "- Recommendations must reference the specific illustrative figures you wrote\n"
-    "  earlier in the document -- do not introduce new unexplained numbers.\n"
-    "- Before finalising, do a self-check: are all derived numbers mathematically\n"
-    "  consistent with the base figures you stated Fix any inconsistency.\n"
+    "\nDATA RULES FOR NO-FILE / ILLUSTRATIVE REPORTS -- CRITICAL:\n"
+    "- No source data file has been uploaded. You are generating an illustrative document based on assumptions.\n"
+    "- ALL numerical values, KPIs, compliance rates, percentages, forecasts, and risk scores you generate MUST be explicitly marked as hypothetical estimates, illustrative assumptions, or illustrative scenarios, NOT as actual verified facts.\n"
+    "- You MUST include a prominent 'Assumptions & Disclaimer' section at the very beginning of the document/presentation (e.g. at the top of the Executive Summary or Introduction) stating: 'Disclaimer: No source files were provided for this document. All metrics, compliance rates, risk scores, and recommendations are based on hypothetical assumptions and illustrative figures for demonstration purposes only.'\n"
+    "- Maintain a clear, explicit distinction between hypothetical examples and actual findings. Never present assumptions as verified facts.\n"
+    "- For every numeric value, KPI, compliance rate, or percentage you state, use a clear confidence or assumption statement (e.g., 'Assuming a hypothetical baseline...', 'Under this illustrative scenario...', 'Based on the assumption that...').\n"
+    "- Do NOT leave any unresolved placeholder values (such as %, TBD, or [insert ...]). All placeholders must be completely resolved to illustrative scenario values.\n"
+    "- Tailor any recommendations to the specific illustrative scenario context, but clearly qualify them as recommendations derived from these hypothetical assumptions rather than actual business findings.\n"
+    "- Ensure all hypothetical figures you state are internally consistent and mathematically correct.\n"
 )
  
 # -- Multi-file rules ----------------------------------------------------------
@@ -248,6 +230,234 @@ _CROSS_FILE_RULES = (
  
 # -- Document-type-aware output instructions -----------------------------------
 _DOCTYPE_OUTPUT_RULES = {
+ 
+    # ── Official PSU / Government document types ───────────────────────────────
+ 
+    "file_note": (
+        "\nDOCUMENT TYPE -- FILE NOTE (Official PSU/Government Format):\n"
+        "A File Note records deliberations, facts, and recommendations for decision-making.\n"
+        "Structure MUST follow this exact order:\n"
+        "  # File Note: [Subject]\n"
+        "  File No.: __________________\n"
+        "  Department: __________________\n"
+        "  Date: __________________\n"
+        "  Subject: [subject in brief]\n"
+        "  ---\n"
+        "  ## Background / Facts of the Case\n"
+        "    (Chronological facts, previous correspondence references, context)\n"
+        "  ## Analysis / Deliberations\n"
+        "    (Point-wise examination of options, pros/cons, regulatory references)\n"
+        "  ## Financial Implications\n"
+        "    (Budget head, estimated cost, approval required -- omit section if not applicable)\n"
+        "  ## Recommendation\n"
+        "    (Clear, specific recommendation -- one or two paragraphs)\n"
+        "  ## Approval Sought\n"
+        "    (State exactly what approval/sanction is being sought)\n"
+        "  Submitted for approval of: __________________\n"
+        "  Prepared by: __________________\n"
+        "CRITICAL RULES:\n"
+        "- Use formal government language throughout.\n"
+        "- Number every paragraph inside each ## section sequentially (1., 2., 3. ...).\n"
+        "- Reference file numbers and prior correspondence with 'vide letter no.' format.\n"
+        "- End with a clear 'Approval Sought' statement -- never leave it open-ended.\n"
+        "- Do NOT use bullet points inside body sections -- use numbered paragraphs.\n"
+        "- Do NOT add sections not listed above.\n"
+        "- Do NOT generate [CHART: ...] markers in this document type.\n"
+        "- Use underlines (________________) for any field values not provided in context.\n"
+    ),
+ 
+    "office_memorandum": (
+        "\nDOCUMENT TYPE -- OFFICE MEMORANDUM / O.M. (Official PSU/Government Format):\n"
+        "An Office Memorandum is used for inter-departmental official communication.\n"
+        "Structure MUST follow this exact order:\n"
+        "  # Office Memorandum\n"
+        "  No.: __________________          Date: __________________\n"
+        "  From: [Issuing Office / Department]\n"
+        "  To:   [Recipient Office / Department]\n"
+        "  Subject: [Subject]\n"
+        "  ---\n"
+        "  ## Body\n"
+        "    (Open with 'The undersigned is directed to...' or reference to prior O.M.)\n"
+        "    (Content in numbered paragraphs)\n"
+        "  ## Action Required\n"
+        "    (What the recipient must do and by when -- omit if not applicable)\n"
+        "  Sd/-\n"
+        "  __________________\n"
+        "  [Designation]\n"
+        "  [Department / Division]\n"
+        "CRITICAL RULES:\n"
+        "- Open with 'The undersigned is directed to...' -- NEVER use first-person 'I'.\n"
+        "- Use numbered paragraphs throughout the Body section.\n"
+        "- Do NOT add Executive Summary, KPI, or analytical sections.\n"
+        "- Do NOT generate [CHART: ...] markers in this document type.\n"
+        "- Use underlines (________________) for any field values not provided in context.\n"
+    ),
+ 
+    "office_notice": (
+        "\nDOCUMENT TYPE -- OFFICE NOTICE (Official PSU/Government Format):\n"
+        "An Office Notice communicates information or directives to a group of recipients.\n"
+        "Structure MUST follow this exact order:\n"
+        "  # Office Notice\n"
+        "  Notice No.: __________________             Date: __________________\n"
+        "  Department: __________________\n"
+        "  Subject: [subject]\n"
+        "  ---\n"
+        "  ## Notice Body\n"
+        "    (Open with 'It is hereby notified that...' or 'All concerned are informed that...')\n"
+        "    (Key information in clear numbered points)\n"
+        "  ## Compliance / Action Required\n"
+        "    (What recipients must do, by when)\n"
+        "  For [Issuing Authority]\n"
+        "  __________________\n"
+        "  [Name & Designation]\n"
+        "  Distribution: All Concerned\n"
+        "CRITICAL RULES:\n"
+        "- Begin with 'It is hereby notified that...' or 'All concerned are informed that...'\n"
+        "- Use numbered points inside sections.\n"
+        "- State deadline and responsible party explicitly in the Compliance section.\n"
+        "- Do NOT use analytical or report-style language.\n"
+        "- Do NOT generate [CHART: ...] markers in this document type.\n"
+        "- Use underlines (________________) for any field values not provided in context.\n"
+    ),
+ 
+    "circular": (
+        "\nDOCUMENT TYPE -- OFFICE CIRCULAR (Official PSU/Government Format):\n"
+        "A Circular is a policy or procedure communication issued to a wide audience.\n"
+        "Structure MUST follow this exact order:\n"
+        "  # Circular No. __________________\n"
+        "  Date: __________________\n"
+        "  Subject: [subject]\n"
+        "  ---\n"
+        "  ## Preamble / Background\n"
+        "    (Why this circular is issued; reference to policy/authority under which issued)\n"
+        "  ## Scope & Applicability\n"
+        "    (Who this circular applies to)\n"
+        "  ## Instructions / Directives\n"
+        "    (Numbered list of specific instructions -- each instruction on its own numbered line)\n"
+        "  ## Effective Date\n"
+        "    (State the date from which this circular is effective)\n"
+        "  ## Non-Compliance\n"
+        "    (Consequences of non-compliance -- omit if not applicable)\n"
+        "  By Order of [Authority]\n"
+        "  __________________\n"
+        "  [Name & Designation]\n"
+        "  Distribution: All Departments\n"
+        "CRITICAL RULES:\n"
+        "- Use numbered instructions -- NEVER prose paragraphs for directives.\n"
+        "- State the effective date explicitly.\n"
+        "- Reference the authority/policy under which this circular is issued.\n"
+        "- Do NOT generate [CHART: ...] markers in this document type.\n"
+        "- Use underlines (________________) for any field values not provided in context.\n"
+    ),
+ 
+    "purchase_note": (
+        "\nDOCUMENT TYPE -- PURCHASE / PROCUREMENT NOTE (Official PSU/Government Format):\n"
+        "A Purchase Note is a JUSTIFICATION and DECISION-SUPPORT document for procurement approval.\n"
+        "It is NOT a payment form, billing certificate, or transaction record.\n"
+        "The purpose is to present a thorough operational case for why the procurement is necessary,\n"
+        "what the risks of not procuring are, and what approval is sought.\n"
+        "\n"
+        "Structure MUST follow this exact order:\n"
+        "\n"
+        "  # Purchase Note: [Item or Service Being Procured]\n"
+        "  Note No.: __________________          Date: __________________\n"
+        "  Department: __________________\n"
+        "  Subject: Purchase of [item/service description]\n"
+        "  ---\n"
+        "\n"
+        "  ## 1. Purpose and Operational Requirement\n"
+        "  Write 3-5 numbered paragraphs explaining:\n"
+        "  - What exactly is being procured and why it is needed operationally\n"
+        "  - What specific operational gap, problem, or business need drives this requirement\n"
+        "  - Which department, team, or process will use it and how\n"
+        "  - What the current situation is without this procurement\n"
+        "  - How it aligns with HPCL's operational or strategic objectives\n"
+        "\n"
+        "  ## 2. Specification of Items / Services\n"
+        "  Provide a markdown table:\n"
+        "  | S.No | Item / Service Description | Technical Specification | Quantity | Est. Unit Cost (Rs.) | Total Est. Cost (Rs.) |\n"
+        "  |------|---------------------------|------------------------|----------|---------------------|----------------------|\n"
+        "  For unknown values, write: Rs. __________________ or Qty: __________________\n"
+        "\n"
+        "  ## 3. Operational Justification and Risk of Non-Procurement\n"
+        "  Write 3-5 numbered paragraphs covering:\n"
+        "  - Why these specific technical specifications are required (not a lesser alternative)\n"
+        "  - What alternatives were considered and why they were ruled out\n"
+        "  - What specific operational, safety, compliance, or financial risks arise if this is NOT procured\n"
+        "  - What the consequence to service delivery or production continuity would be\n"
+        "\n"
+        "  ## 4. Budget Provision and Financial Considerations\n"
+        "  Write 2-3 numbered paragraphs covering:\n"
+        "  - The budget head under which this expenditure falls\n"
+        "  - Whether budget has been sanctioned or is being sought\n"
+        "  - The estimated total cost and how it compares to available budget\n"
+        "  Use lines like: Budget Head: __________________ or Estimated Cost: Rs. __________________ for unknowns.\n"
+        "\n"
+        "  ## 5. Procurement Method and Vendor Strategy\n"
+        "  Write 2-3 numbered paragraphs covering:\n"
+        "  - The recommended procurement method (Open Tender / Limited Tender / Single Source / Rate Contract / GeM)\n"
+        "  - The operational rationale for choosing this method\n"
+        "  - Any empanelled vendors or prior procurement history if available\n"
+        "  - Compliance with GFR 2017 / HPCL procurement guidelines\n"
+        "\n"
+        "  ## 6. Proposed Delivery Schedule\n"
+        "  Write 1-2 numbered paragraphs covering:\n"
+        "  - Expected timeline for delivery, commissioning, or completion\n"
+        "  - Any critical dependencies or go-live milestones\n"
+        "\n"
+        "  ## 7. Recommendation and Approval Sought\n"
+        "  Write a clear, formal recommendation paragraph followed by:\n"
+        "  - The exact sanction or approval being sought from the competent authority\n"
+        "  - The amount for which approval is requested (or: Rs. __________________ if unknown)\n"
+        "\n"
+        "  Prepared by: __________________\n"
+        "  Designation: __________________\n"
+        "  Recommended by: __________________\n"
+        "  Designation: __________________\n"
+        "  Approved by: __________________\n"
+        "  Designation (Competent Authority): __________________\n"
+        "\n"
+        "CRITICAL RULES:\n"
+        "- This document MUST read as a professional procurement justification written by a government officer.\n"
+        "- Section 1 and Section 3 MUST be substantive (3-5 numbered paragraphs each) -- never one-liners.\n"
+        "- Section 2 MUST be a properly formatted markdown table.\n"
+        "- Section 5 MUST name the recommended procurement method with its operational rationale.\n"
+        "- Section 7 MUST end with a clear formal statement of approval sought.\n"
+        "- Use underlines (__________________ or Rs. __________________) for unknowns -- NEVER brackets.\n"
+        "- Use numbered paragraphs (1., 2., 3.) inside every section -- NEVER bullet points.\n"
+        "- Do NOT generate [CHART: ...] markers in this document type.\n"
+        "- Do NOT write payment vouchers, bill-checking certificates, or completion certificates.\n"
+        "- Do NOT use casual language. Every sentence must be formal government prose.\n"
+    ),
+ 
+    "office_order": (
+        "\nDOCUMENT TYPE -- OFFICE ORDER (Official PSU/Government Format):\n"
+        "An Office Order conveys official decisions, transfers, promotions, or directives.\n"
+        "Structure MUST follow this exact order:\n"
+        "  # Office Order No. __________________\n"
+        "  Date: __________________\n"
+        "  Subject: [subject]\n"
+        "  ---\n"
+        "  ## Order\n"
+        "    (Open with 'It is ordered that...' or 'Sanction is hereby accorded to...')\n"
+        "    (Numbered paragraphs containing the specific directive)\n"
+        "  ## Effective Date\n"
+        "    (State when this order comes into effect)\n"
+        "  ## Compliance\n"
+        "    (Who must comply and any reporting requirement)\n"
+        "  By Order of Competent Authority\n"
+        "  __________________\n"
+        "  [Name & Designation]\n"
+        "  Copy to: All Concerned\n"
+        "CRITICAL RULES:\n"
+        "- Open with 'It is ordered that...' or 'Sanction is hereby accorded to...'\n"
+        "- Number all paragraphs inside ## Order sequentially.\n"
+        "- State effective date and compliance requirements explicitly.\n"
+        "- Do NOT generate [CHART: ...] markers in this document type.\n"
+        "- Use underlines (________________) for any field values not provided in context.\n"
+    ),
+ 
+    # ── Standard analytical / content document types ──────────────────────────
  
     "training_material": (
         "\nDOCUMENT TYPE -- EDUCATIONAL / TRAINING MATERIAL:\n"
@@ -437,6 +647,7 @@ SYSTEM_PROMPTS = {
         "    Educational, informational, and policy documents should instead begin with Introduction and Learning Objectives slides.\n"
         "22. Every recommendation bullet must name the specific metric, its current\n"
         "    value, and what change is needed -- no generic action items.\n"
+        "    For analytical/business presentations, follow recommendations with a ## Implementation Roadmap slide outlining immediate (30d), medium (60d), and strategic (90d) actions.\n"
         "23. Each content slide must end with a bullet that is forward-looking:\n"
         "    what happens if this trend continues, or what opportunity is at risk.\n"
         "24. NARRATIVE ARC: slides must flow as situation -> complication\n"
@@ -447,6 +658,67 @@ SYSTEM_PROMPTS = {
         "\n" + CHART_MARKER_GUIDE
     ),
  
+    # -- Official document system prompt ---------------------------------------
+    "official_doc": (
+        "You are an expert in drafting official government and PSU (Public Sector Undertaking) "
+        "documents for HPCL (Hindustan Petroleum Corporation Limited). "
+        "You produce formal internal documents following standard office procedure formats used "
+        "in Indian central government and PSU organisations.\n\n"
+ 
+        "CORE IDENTITY OF THIS TASK:\n"
+        "You are acting as a senior HPCL officer drafting an official document. "
+        "Your output must read as a real, complete, professionally written government document -- "
+        "not a template, not a form, not a skeleton with blanks everywhere.\n\n"
+ 
+        "CONTENT GENERATION RULES -- MANDATORY:\n"
+        "1. Generate SUBSTANTIVE CONTENT for every section. Do not produce one-line sections.\n"
+        "2. For Purchase Notes: Sections 1 (Purpose) and 3 (Justification) must each have "
+        "   3-5 numbered paragraphs of real operational reasoning based on the context given.\n"
+        "3. For File Notes: Background and Analysis sections must have 3+ numbered paragraphs.\n"
+        "4. For Circulars and Notices: Instructions must be a numbered list of 4-8 specific directives.\n"
+        "5. Derive content from whatever context is given in the prompt (subject matter, department, "
+        "   type of item/policy). If the user says 'purchase note for laptops', write real "
+        "   operational justification about why laptops are needed in an HPCL office context.\n\n"
+ 
+        "ANTI-HALLUCINATION RULES -- FOR METADATA FIELDS ONLY:\n"
+        "These rules apply ONLY to specific metadata fields (reference numbers, dates, names, addresses) "
+        "-- NOT to the body content which must be fully generated.\n"
+        "1. NEVER write real or fictional person names (e.g. 'Shri S. K. Singh'). "
+        "   Use blank underlines: __________________ for name fields.\n"
+        "2. NEVER write specific office addresses unless explicitly in the prompt.\n"
+        "3. NEVER invent specific reference numbers (e.g. 'HPCL/IT/2026/001'). "
+        "   Use: Reference No.: __________________ or HPCL/____/____/____\n"
+        "4. NEVER write specific dates (e.g. '23/06/2026') unless given in the prompt. "
+        "   Use: Date: __________________\n"
+        "5. NEVER invent specific financial figures. "
+        "   Use: Rs. __________________ for unknown costs.\n\n"
+ 
+        "ADAPTIVE CONTENT RULES:\n"
+        "1. USE PROVIDED INFORMATION FIRST: If the prompt contains specific details "
+        "   (item names, quantities, departments, policy names), use them exactly.\n"
+        "2. FILL IN LOGICAL CONTENT: For operational sections (Purpose, Justification, "
+        "   Instructions), generate realistic, professional HPCL-appropriate content "
+        "   based on what has been asked for. A request for a 'purchase note for network "
+        "   switches' should produce real technical and operational reasoning about network "
+        "   infrastructure needs -- not blank lines.\n"
+        "3. PROFESSIONAL FALLBACKS: When specific values are unknown, use professional "
+        "   generic language rather than brackets or blanks:\n"
+        "   - 'standard hardware specifications' instead of '[specs]'\n"
+        "   - 'the approved budget allocation' instead of '[budget]'\n"
+        "   - 'Preparing Officer' instead of '[Name]'\n\n"
+ 
+        "FORMATTING RULES:\n"
+        "- Follow the EXACT format structure provided in the user prompt.\n"
+        "- Use formal, impersonal government language throughout.\n"
+        "- NEVER use first-person singular ('I'). Use 'the undersigned', 'it is submitted', etc.\n"
+        "- Number all paragraphs within body sections sequentially (1., 2., 3. ...).\n"
+        "- All header fields must appear before body sections.\n"
+        "- Do NOT add sections not specified in the format.\n"
+        "- Do NOT generate charts, KPI dashboards, or analytical summaries.\n"
+        "- Start your response with a # heading containing the document type and subject.\n\n"
+        + _CORE_RULES
+    ),
+ 
     # -- Pure-prompt mode (no files uploaded) ---------------------------------
     "docx_noinput": (
         "You are an expert enterprise document writer for HPCL "
@@ -455,6 +727,7 @@ SYSTEM_PROMPTS = {
         + _CORE_RULES
         + _NOINPUT_DATA_RULES
         + "\nFORMATTING:\n"
+        "- The first section MUST be ## Assumptions & Disclaimer.\n"
         "- Use ## for section headings, ### for subsections.\n"
         "- Use bullet points (- ) for lists; markdown tables for structured info.\n"
         "- Write policy/guideline/instructional content appropriate for HPCL.\n"
@@ -470,6 +743,7 @@ SYSTEM_PROMPTS = {
         + _CORE_RULES
         + _NOINPUT_DATA_RULES
         + "\nFORMATTING:\n"
+        "- The first section MUST be ## Assumptions & Disclaimer.\n"
         "- Use ## for major sections, ### for subsections.\n"
         "- Write policy/guideline/instructional content appropriate for HPCL.\n"
         "- Be specific and realistic -- no generic filler content.\n"
@@ -488,24 +762,13 @@ SYSTEM_PROMPTS = {
         "2. Write 4 to 6 bullets per ## using - \n"
         "3. Each bullet max 20 words, one complete sentence.\n"
         "4. NEVER write ## Title Page, ## Acknowledgement, ## Thank You.\n"
-        "5. Every bullet must be fully written with a concrete number or finding.\n"
-        "   A bullet missing its number is a CRITICAL ERROR.\n"
-        "6. All figures must be internally consistent across slides.\n"
-        "7. The ## Executive Summary slide bullets must answer in order:\n"
-        "   - What is the single most important issue (with a specific number)\n"
-        "   - Why is it happening (root cause in one sentence)\n"
-        "   - What must leadership do about it in the next 90 days\n"
-        "   - What is the largest cross-cutting risk or opportunity\n"
-        "8. Each content slide must end with a forward-looking bullet.\n"
-        "9. NARRATIVE ARC: slides flow as situation -> complication -> insight\n"
-        "   -> risk -> recommendation. Do not jump between unrelated topics.\n"
-        "10. Content should be policy/strategy/overview appropriate for HPCL.\n"
-        "11. Do NOT generate [CHART: ...] markers -- no data to chart.\n"
+        "5. The FIRST slide must be ## Assumptions & Disclaimer, which sets the context that no source data files were provided.\n"
+        "6. Every bullet presenting numbers or findings must be qualified as a hypothetical estimate or illustrative assumption.\n"
+        "7. Content should be policy/strategy/overview appropriate for HPCL.\n"
+        "8. Do NOT generate [CHART: ...] markers -- no data to chart.\n"
     ),
  
     # -- Title generation ------------------------------------------------------
-    # FIX: removed "Keep it generic" which caused all titles to be generic.
-    # Now instructs the LLM to derive the title from actual file content.
     "plan": (
         "You are a document title generator. Your only job is to output a single "
         "5-7 word professional document title based on the file content and user request provided.\n\n"
@@ -530,6 +793,12 @@ SYSTEM_PROMPTS = {
     ),
 }
  
+# -- Official doc types that use the "official_doc" system prompt --------------
+_OFFICIAL_DOC_TYPES = {
+    "file_note", "office_memorandum", "office_notice",
+    "circular", "purchase_note", "office_order"
+}
+ 
  
 def get_doctype_rules(doc_type: str) -> str:
     """
@@ -547,25 +816,47 @@ def get_cross_file_rules() -> str:
     return _CROSS_FILE_RULES
  
  
+def is_official_doc_type(doc_type: str) -> bool:
+    """Check if a doc_type is an official PSU/government document type."""
+    return doc_type in _OFFICIAL_DOC_TYPES
+ 
+ 
 def query_llama(prompt: str, output_type: str = "docx",
                 is_combined: bool = False,
                 has_files: bool = True,
-                system_override: str = None) -> str:
+                system_override: str = None,
+                doc_type: str = None) -> str:
     """
-    has_files: set False when the user typed a prompt with no uploaded files.
-               Automatically selects the _noinput variant of the system prompt.
+    Call the Groq LLaMA model.
+ 
+    has_files   : set False when the user typed a prompt with no uploaded files.
+                  Automatically selects the _noinput variant of the system prompt.
+    doc_type    : when provided and is an official PSU doc type, overrides the
+                  system prompt with the dedicated "official_doc" prompt so the
+                  LLM uses formal government language instead of analytical rules.
     """
     if system_override:
         system_prompt = system_override
+    elif doc_type and doc_type in _OFFICIAL_DOC_TYPES:
+        system_prompt = SYSTEM_PROMPTS["official_doc"]
+        logging.info(f"[query_llama] Using official_doc system prompt for doc_type='{doc_type}'")
     elif not has_files:
-        system_prompt = SYSTEM_PROMPTS.get(
-            f"{output_type}_noinput",
-            SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"])
-        )
+        # For official doc types with no files, still use official_doc prompt
+        if doc_type and doc_type in _OFFICIAL_DOC_TYPES:
+            system_prompt = SYSTEM_PROMPTS["official_doc"]
+        else:
+            system_prompt = SYSTEM_PROMPTS.get(
+                f"{output_type}_noinput",
+                SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"])
+            )
     else:
         system_prompt = SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"])
  
-    max_tokens = 8192 if is_combined else 4096
+    # Official docs always get more tokens to allow substantive content
+    if doc_type and doc_type in _OFFICIAL_DOC_TYPES:
+        max_tokens = 6000
+    else:
+        max_tokens = 8192 if is_combined else 4096
  
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -583,14 +874,14 @@ def query_llama(prompt: str, output_type: str = "docx",
                         {"role": "system", "content": system_prompt},
                         {"role": "user",   "content": prompt},
                     ],
-                    "temperature": 0.5,
+                    "temperature": 0.4,
                     "max_tokens":  max_tokens,
                 }
  
                 logging.info(
                     f"Calling Groq: model={model}, attempt={attempt + 1}, "
                     f"output_type={output_type}, has_files={has_files}, "
-                    f"max_tokens={max_tokens}"
+                    f"doc_type={doc_type}, max_tokens={max_tokens}"
                 )
  
                 response = requests.post(

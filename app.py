@@ -83,15 +83,18 @@ def generate():
     has_files = len(saved_paths) > 0
     logger.info(f"Total saved: {len(saved_paths)} | has_files={has_files}")
  
-    # ── Run pipeline ──────────────────────────────────────────────────────────
     try:
+        warnings = []
         result = run_agent_from_api(
             prompt=prompt,
             file_paths=saved_paths,
             output_format=doc_type,
             has_files=has_files,
-            add_acknowledgement=wants_acknowledgement(prompt) if doc_type == "pptx" else False
+            add_acknowledgement=wants_acknowledgement(prompt) if doc_type == "pptx" else False,
+            warnings_out=warnings
         )
+        for w in warnings:
+            flash(w, "warning")
  
         # Unpack FIRST — orchestrator returns (path, slide_count) for pptx,
         # plain path for docx/pdf. os.path.basename must never receive a tuple.
@@ -129,12 +132,24 @@ def generate():
  
     except Exception as e:
         logger.exception("Generation failed")
+        err_msg = str(e)
+        groq_key = os.getenv("GROQ_API_KEY")
+        if groq_key:
+            err_msg = err_msg.replace(groq_key, "[REDACTED_API_KEY]")
         return render_template(
             "layout.html",
             chat_history=[],
-            generated_content=f"❌ Error: {str(e)}",
+            generated_content=f"❌ Error: {err_msg}",
             download_url=None
         )
+    finally:
+        for path in saved_paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.info(f"Cleaned up uploaded file: {path}")
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to delete uploaded file {path}: {cleanup_err}")
  
  
 @app.route("/download/<path:filename>")
@@ -143,5 +158,7 @@ def download(filename):
  
  
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    port = int(os.getenv("PORT", 5001))
+    debug = os.getenv("FLASK_DEBUG", "False").lower() in ("true", "1")
+    app.run(debug=debug, port=port)
  

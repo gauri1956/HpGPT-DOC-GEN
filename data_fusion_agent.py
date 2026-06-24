@@ -93,6 +93,41 @@ def canonical_entity(col_name: str) -> str | None:
         if kw in cl:
             return _KW_TO_ENTITY[kw]
     return None
+
+
+_METRIC_SYNONYMS: dict[str, list[str]] = {
+    "attrition_rate": ["attrition rate", "attrition %", "resignation %", "turnover rate", "employee turnover", "exit rate", "attrition"],
+    "revenue": ["revenue", "sales", "turnover", "income", "billing", "receipts", "sales volume", "petrol sales", "diesel sales", "lpg sales"],
+    "headcount": ["headcount", "employee count", "staff count", "active employees", "total employees", "no of employees", "strength"],
+    "salary": ["salary", "compensation", "pay", "wages", "package", "cost to company", "ctc"],
+    "inventory": ["inventory", "stock", "closing stock", "opening stock", "quantity", "stock quantity"],
+    "profit": ["profit", "margin", "earnings", "net income", "p&l", "profitability"],
+}
+
+
+def canonical_metric(col_name: str) -> str:
+    cl = col_name.lower().strip()
+    for metric, keywords in _METRIC_SYNONYMS.items():
+        if any(kw in cl for kw in keywords):
+            return metric
+    return re.sub(r'[^a-z0-9]', '', cl)
+
+
+def detect_column_unit(col_name: str) -> str:
+    cl = col_name.lower()
+    if any(u in cl for u in ["kl", "kiloliter"]):
+        return "volume_kl"
+    if any(u in cl for u in ["mt", "tonne", "ton"]):
+        return "volume_mt"
+    if any(u in cl for u in ["inr", "lakh", "rs", "rupee", "usd", "$", "wages", "salary", "compensation"]):
+        return "currency"
+    if any(u in cl for u in ["%", "pct", "percent", "rate", "ratio"]):
+        return "percentage"
+    if any(u in cl for u in ["employee", "staff", "headcount", "count", "no of"]):
+        return "count"
+    if any(u in cl for u in ["hours", "hrs"]):
+        return "hours"
+    return "generic_numeric"
  
  
 # ==============================================================================
@@ -345,88 +380,70 @@ def _fuse_numerics(
     links: list[LinkRecord]
 ) -> list[dict]:
     """
-    For each high-confidence link, merge sample DataFrames and compute
-    per-entity-value aggregates.  Returns list of fused records.
+    For each high-confidence link, use the aggregated entity_stats computed from
+    the full datasets to compare metrics across files. Returns list of fused records.
     """
-    def _to_df(data: dict) -> pd.DataFrame:
-        if data.get("type") == "multi_sheet":
-            frames = [
-                pd.DataFrame(s.get("sample", []))
-                for s in data.get("sheets", {}).values()
-                if s.get("sample")
-            ]
-            return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        rows = data.get("sample", [])
-        return pd.DataFrame(rows) if rows else pd.DataFrame()
- 
     fused: list[dict] = []
- 
+    
+    def get_file_entity_stats(fname: str) -> list[dict]:
+        data = file_data[fname]
+        if data.get("type") == "multi_sheet":
+            all_stats = []
+            for sheet_name, sdata in data.get("sheets", {}).items():
+                if sdata.get("entity_stats"):
+                    for est in sdata["entity_stats"]:
+                        est_copy = est.copy()
+                        est_copy["sheet"] = sheet_name
+                        all_stats.append(est_copy)
+            return all_stats
+        return data.get("entity_stats", [])
+
     for link in links:
         if link.confidence < 0.5:
-            continue   # only fuse links with meaningful confidence
- 
-        df_a = _to_df(file_data[link.file_a])
-        df_b = _to_df(file_data[link.file_b])
- 
-        if df_a.empty or df_b.empty:
             continue
-        if link.col_a not in df_a.columns or link.col_b not in df_b.columns:
-            continue
- 
-        try:
-            tmp_a = df_a.copy()
-            tmp_b = df_b.copy()
-            tmp_a["__jk__"] = tmp_a[link.col_a].astype(str).str.strip().str.lower()
-            tmp_b["__jk__"] = tmp_b[link.col_b].astype(str).str.strip().str.lower()
- 
-            fa_tag = link.file_a.split(".")[0][:8]
-            fb_tag = link.file_b.split(".")[0][:8]
- 
-            merged = pd.merge(
-                tmp_a, tmp_b, on="__jk__",
-                suffixes=(f"_{fa_tag}", f"_{fb_tag}"),
-                how="inner"
-            )
-            merged.drop(columns=["__jk__"], inplace=True, errors="ignore")
- 
-            if merged.empty:
-                continue
- 
-            group_col = (
-                link.col_a if link.col_a in merged.columns
-                else merged.columns[0]
-            )
- 
-            for val, grp in merged.groupby(group_col):
-                num_summary: dict[str, dict] = {}
-                for col in grp.select_dtypes(include="number").columns:
-                    s = grp[col].dropna()
-                    if s.empty or len(s) < 1:
-                        continue
-                    num_summary[col] = {
-                        "sum":  round(float(s.sum()),  2),
-                        "mean": round(float(s.mean()), 2),
-                        "min":  round(float(s.min()),  2),
-                        "max":  round(float(s.max()),  2),
-                    }
- 
-                if num_summary:
-                    fused.append({
-                        "entity_type":     link.entity_type,
-                        "entity_value":    str(val),
-                        "source_files":    [link.file_a, link.file_b],
-                        "join_cols":       [link.col_a, link.col_b],
-                        "numeric_summary": num_summary,
-                        "link_confidence": link.confidence,
-                    })
- 
-        except Exception as exc:
-            logger.warning(
-                f"[DataFusion] Merge failed "
-                f"{link.file_a}.{link.col_a}  "
-                f"{link.file_b}.{link.col_b}: {exc}"
-            )
- 
+        
+        stats_a = get_file_entity_stats(link.file_a)
+        stats_b = get_file_entity_stats(link.file_b)
+        
+        stats_a_filtered = [s for s in stats_a if s["entity_col"] == link.col_a]
+        stats_b_filtered = [s for s in stats_b if s["entity_col"] == link.col_b]
+        
+        fa_tag = link.file_a.split(".")[0][:8]
+        fb_tag = link.file_b.split(".")[0][:8]
+        
+        for sa in stats_a_filtered:
+            ncol_a = sa["numeric_col"]
+            metric_a = canonical_metric(ncol_a)
+            unit_a = detect_column_unit(ncol_a)
+            
+            for sb in stats_b_filtered:
+                ncol_b = sb["numeric_col"]
+                metric_b = canonical_metric(ncol_b)
+                unit_b = detect_column_unit(ncol_b)
+                
+                is_match = (metric_a == metric_b and unit_a == unit_b)
+                is_relation = (metric_a != metric_b)
+                
+                if is_match or is_relation:
+                    shared_vals = set(sa["stats"].keys()) & set(sb["stats"].keys())
+                    for val in shared_vals:
+                        val_stats_a = sa["stats"][val]
+                        val_stats_b = sb["stats"][val]
+                        
+                        num_summary = {
+                            f"{ncol_a}_in_{fa_tag}": val_stats_a,
+                            f"{ncol_b}_in_{fb_tag}": val_stats_b,
+                        }
+                        
+                        fused.append({
+                            "entity_type":     link.entity_type,
+                            "entity_value":    val,
+                            "source_files":    [link.file_a, link.file_b],
+                            "join_cols":       [link.col_a, link.col_b],
+                            "numeric_summary": num_summary,
+                            "link_confidence": link.confidence,
+                            "is_canonical_match": is_match,
+                        })
     return fused
  
  
@@ -495,50 +512,154 @@ def _prioritise_insights(
             score       = round(score, 3),
         ))
  
-    # -- Insight type B: numeric fusion observations ---------------------------
+    # -- Insight type B: numeric fusion observations & contradiction detection -
     for rec in fused:
+        if not rec.get("is_canonical_match", True):
+            continue
         if not rec["numeric_summary"]:
             continue
- 
+
         entity_weight = _ENTITY_IMPORTANCE.get(rec["entity_type"], 0.5)
- 
-        # Find highest-variance column in this record
-        best_col, best_var = "", 0.0
-        for col, agg in rec["numeric_summary"].items():
-            spread = agg["max"] - agg["min"]
-            if spread > best_var:
-                best_var, best_col = spread, col
- 
-        # Variance ratio: spread / mean (coefficient of variation proxy)
-        mean_val = rec["numeric_summary"].get(best_col, {}).get("mean", 1) or 1
-        var_ratio = min(best_var / abs(mean_val), 1.0) if mean_val else 0.0
- 
-        score = (rec["link_confidence"] * 0.4
-                 + entity_weight * 0.3
-                 + var_ratio * 0.3)
- 
-        if best_col:
-            agg   = rec["numeric_summary"][best_col]
-            detail = (
-                f"For {rec['entity_type']} '{rec['entity_value']}', "
-                f"{best_col} ranges from {agg['min']} to {agg['max']} "
-                f"(mean {agg['mean']}) across "
-                f"{' and '.join(rec['source_files'])}. "
-                f"Investigate this spread for root-cause patterns."
-            )
-            title = (
-                f"{rec['entity_type'].title()} '{rec['entity_value']}': "
-                f"numeric variance in {best_col}"
-            )
+        keys = list(rec["numeric_summary"].keys())
+        if len(keys) >= 2:
+            key_a, key_b = keys[0], keys[1]
+            stats_a = rec["numeric_summary"][key_a]
+            stats_b = rec["numeric_summary"][key_b]
+            
+            mean_a = stats_a.get("mean", 0.0)
+            mean_b = stats_b.get("mean", 0.0)
+            
+            diff = abs(mean_a - mean_b)
+            avg_mean = (mean_a + mean_b) / 2.0
+            rel_diff = diff / avg_mean if avg_mean != 0 else 0.0
+            
+            # Determine if values are contradictory or consistent
+            if rel_diff > 0.15 and diff > 0.5:
+                title = f"Data Contradiction: {rec['entity_type'].title()} '{rec['entity_value']}' metric mismatch"
+                detail = (
+                    f"Contradiction detected for {rec['entity_type']} '{rec['entity_value']}': "
+                    f"'{key_a}' is {mean_a} in {rec['source_files'][0]}, but "
+                    f"'{key_b}' is {mean_b} in {rec['source_files'][1]}. "
+                    f"This is a variance of {diff:.1f} ({rel_diff:.1%}). "
+                    f"Investigate the data sources for reporting discrepancies."
+                )
+                priority = "Critical" if rel_diff > 0.3 else "High"
+                score = 0.5 + rel_diff * 0.5
+            else:
+                title = f"Data Bridge: {rec['entity_type'].title()} '{rec['entity_value']}' numeric consistency"
+                detail = (
+                    f"Consistent data found for {rec['entity_type']} '{rec['entity_value']}' across files: "
+                    f"'{key_a}' is {mean_a} in {rec['source_files'][0]} and "
+                    f"'{key_b}' is {mean_b} in {rec['source_files'][1]}. "
+                    f"This confirms alignment on this shared metric."
+                )
+                priority = "Medium"
+                score = 0.4 + (1.0 - rel_diff) * 0.2
+                
             insights.append(InsightRecord(
                 title       = title,
                 detail      = detail,
-                priority    = _score_to_priority(score),
+                priority    = priority,
                 files       = rec["source_files"],
                 entity_type = rec["entity_type"],
                 score       = round(score, 3),
             ))
+
+    # -- Insight type C: Trend signals -----------------------------------------
+    for fname, data in file_data.items():
+        trends = data.get("trends", {})
+        if data.get("type") == "multi_sheet":
+            trends = {}
+            for sname, sdata in data.get("sheets", {}).items():
+                if sdata.get("trends"):
+                    trends.update(sdata["trends"])
+                    
+        for col, t in trends.items():
+            if t.get("direction") in ("up", "down"):
+                title = f"Trend Signal: {fname} - {col} is trending {t['direction']}"
+                detail = (
+                    f"In {fname}, metric '{col}' is {t['trend_signal']} "
+                    f"over period '{t['period_column']}'."
+                )
+                insights.append(InsightRecord(
+                    title       = title,
+                    detail      = detail,
+                    priority    = "High" if abs(t["pct_change"]) > 15 else "Medium",
+                    files       = [fname],
+                    entity_type = "period",
+                    score       = round(0.4 + min(abs(t["pct_change"]) / 100, 0.5), 3),
+                ))
  
+    # -- Insight type D: Cross-file Correlation & Dependency Detection ---------
+    # Group fused records by (file_a, file_b, ncol_a, ncol_b, entity_type)
+    groups = defaultdict(list)
+    for rec in fused:
+        keys = list(rec["numeric_summary"].keys())
+        if len(keys) < 2:
+            continue
+        key_a, key_b = keys[0], keys[1]
+        
+        # Strip suffix from key_a and key_b to get raw column names
+        ncol_a = re.sub(r'_in_[a-f0-9]+$', '', key_a)
+        ncol_b = re.sub(r'_in_[a-f0-9]+$', '', key_b)
+        
+        file_a = rec["source_files"][0]
+        file_b = rec["source_files"][1]
+        
+        group_key = (file_a, file_b, ncol_a, ncol_b, rec["entity_type"])
+        groups[group_key].append(rec)
+        
+    for (file_a, file_b, ncol_a, ncol_b, etype), recs in groups.items():
+        if len(recs) < 3:
+            continue
+            
+        list_a = []
+        list_b = []
+        val_names = []
+        
+        for r in recs:
+            keys = list(r["numeric_summary"].keys())
+            sa = r["numeric_summary"][keys[0]]
+            sb = r["numeric_summary"][keys[1]]
+            
+            mean_a = sa.get("mean")
+            mean_b = sb.get("mean")
+            
+            if mean_a is not None and mean_b is not None:
+                list_a.append(mean_a)
+                list_b.append(mean_b)
+                val_names.append((r["entity_value"], mean_a, mean_b))
+                
+        if len(list_a) >= 3:
+            s_a = pd.Series(list_a)
+            s_b = pd.Series(list_b)
+            if s_a.std() > 0 and s_b.std() > 0:
+                r_coeff = s_a.corr(s_b)
+                if not pd.isna(r_coeff) and abs(r_coeff) >= 0.75:
+                    direction_str = "positive" if r_coeff > 0 else "negative"
+                    priority = "Critical" if abs(r_coeff) >= 0.90 else "High"
+                    
+                    samples = []
+                    for val, ma, mb in val_names[:3]:
+                        samples.append(f"'{val}' ({ncol_a}={ma:.1f}, {ncol_b}={mb:.1f})")
+                    sample_str = ", ".join(samples)
+                    
+                    title = f"Cross-file Correlation: '{ncol_a}' and '{ncol_b}' ({direction_str})"
+                    detail = (
+                        f"A strong {direction_str} correlation of {r_coeff:.2f} was detected between "
+                        f"'{ncol_a}' in {file_a} and '{ncol_b}' in {file_b} across the shared '{etype}' dimension. "
+                        f"Sample pairings: {sample_str}."
+                    )
+                    
+                    insights.append(InsightRecord(
+                        title       = title,
+                        detail      = detail,
+                        priority    = priority,
+                        files       = [file_a, file_b],
+                        entity_type = etype,
+                        score       = round(0.5 + abs(r_coeff) * 0.5, 3)
+                    ))
+
     # Sort: Critical -> High -> Medium -> Low, then by score desc
     _ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
     insights.sort(key=lambda i: (_ORDER[i.priority], -i.score))

@@ -372,20 +372,194 @@ def extract_data(file_path, instruction=""):
  
  
 # -- Single-frame summarizer ----------------------------------------------------
- 
+
+_DOMAIN_KEYWORDS = {
+    "HR": ["employee", "attrition", "salary", "headcount", "recruitment", "training", "wages", "staff", "resignation", "turnover", "role", "designation", "grade"],
+    "Finance": ["revenue", "sales", "profit", "loss", "cost", "expense", "budget", "p&l", "margin", "earnings", "price", "billing", "inr"],
+    "Operations": ["inventory", "stock", "dispatch", "receipt", "quantity", "production", "plant", "depot", "terminal", "warehouse", "capacity", "volume", "kl", "mt"],
+}
+
+
+def parse_period_to_sort_key(val):
+    if pd.isnull(val):
+        return (0, 0, 0)
+    s = str(val).strip().lower()
+    
+    # 1. Look for a 4-digit year (e.g. 2024) or 2-digit year preceded by FY/CY (e.g. FY24, FY 24)
+    year = 0
+    year_match = re.search(r'\b(20\d{2})\b', s)
+    if year_match:
+        year = int(year_match.group(1))
+    else:
+        # Check for FY24 or FY 24 or '24
+        fy_match = re.search(r'\b(?:fy|cy)?\s*(\d{2})\b', s)
+        if fy_match:
+            year = 2000 + int(fy_match.group(1))
+            
+    # 2. Look for quarters: q1, q2, q3, q4
+    quarter = 0
+    q_match = re.search(r'\bq([1-4])\b', s)
+    if q_match:
+        quarter = int(q_match.group(1))
+    else:
+        # Check for "quarter 1" or "qtr 1"
+        q_match2 = re.search(r'\b(?:quarter|qtr)\s*([1-4])\b', s)
+        if q_match2:
+            quarter = int(q_match2.group(1))
+
+    # 3. Look for months: jan, feb...
+    month = 0
+    month_map = {
+        "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+        "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+        "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+        "nov": 11, "november": 11, "dec": 12, "december": 12
+    }
+    for mname, mval in month_map.items():
+        if mname in s:
+            month = mval
+            break
+            
+    return (year, quarter, month)
+
+
+def detect_trend_direction(df: pd.DataFrame, period_col: str, numeric_col: str) -> dict | None:
+    if df.empty or len(df) < 2:
+        return None
+    try:
+        sorted_df = df.copy()
+        
+        # Drop rows with null values in period_col or numeric_col
+        sorted_df = sorted_df.dropna(subset=[period_col, numeric_col])
+        if len(sorted_df) < 2:
+            return None
+            
+        period_vals = sorted_df[period_col].astype(str).str.strip().str.lower()
+        
+        # 1. Try standard pd.to_datetime first
+        converted = pd.to_datetime(sorted_df[period_col], errors='coerce')
+        if converted.notnull().mean() > 0.5:
+            sorted_df["__period_sort__"] = converted
+            sorted_df = sorted_df.dropna(subset=["__period_sort__"]).sort_values("__period_sort__")
+        else:
+            # 2. Try parsing custom period tuples (year, quarter, month)
+            sorted_df["__period_sort__"] = sorted_df[period_col].apply(parse_period_to_sort_key)
+            has_sort_info = sorted_df["__period_sort__"].apply(lambda x: x != (0, 0, 0)).any()
+            if has_sort_info:
+                sorted_df = sorted_df.sort_values("__period_sort__")
+            else:
+                # 3. Fallback to numeric sorting if possible
+                numeric_periods = pd.to_numeric(sorted_df[period_col], errors='coerce')
+                if numeric_periods.notnull().mean() > 0.5:
+                    sorted_df["__period_sort__"] = numeric_periods
+                    sorted_df = sorted_df.dropna(subset=["__period_sort__"]).sort_values("__period_sort__")
+                else:
+                    # Fallback: keep original order
+                    pass
+
+        y = sorted_df[numeric_col].astype(float).tolist()
+        if len(y) >= 2:
+            n = len(y)
+            x = list(range(n))
+            mean_x = sum(x) / n
+            mean_y = sum(y) / n
+            
+            num = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
+            den = sum((x[i] - mean_x) ** 2 for i in range(n))
+            slope = num / den if den != 0 else 0.0
+            
+            pct_change = ((y[-1] - y[0]) / y[0] * 100) if y[0] != 0 else 0.0
+            
+            # Stricter trend validation:
+            if abs(pct_change) < 0.5:
+                direction = "flat"
+            elif slope > 0 and y[-1] >= y[0]:
+                direction = "up"
+            elif slope < 0 and y[-1] <= y[0]:
+                direction = "down"
+            elif pct_change > 0:
+                direction = "up"
+            else:
+                direction = "down"
+                
+            return {
+                "direction": direction,
+                "slope": round(slope, 3),
+                "pct_change": round(pct_change, 1),
+                "period_column": period_col,
+                "start_value": round(y[0], 2),
+                "end_value": round(y[-1], 2),
+                "trend_signal": f"trending {direction} (from {round(y[0], 1)} to {round(y[-1], 1)}, change: {round(pct_change, 1)}%)"
+            }
+    except Exception as e:
+        logger.warning(f"Trend detection failed for {period_col} and {numeric_col}: {e}")
+    return None
+
+
+def _generate_metadata_heuristics(df: pd.DataFrame, useful_numeric: list[str]) -> tuple[dict, list[str], list[str]]:
+    # 1. Domain Map
+    domain_map = {}
+    for col in df.columns:
+        cl = col.lower()
+        matched = False
+        for domain, keywords in _DOMAIN_KEYWORDS.items():
+            if any(kw in cl for kw in keywords):
+                domain_map[col] = domain
+                matched = True
+                break
+        if not matched and col in useful_numeric:
+            domain_map[col] = "Finance"  # Default domain for numeric cols if unmatched
+            
+    # 2. Causal Hints
+    causal_hints = []
+    has_attrition = any("attrition" in c or "resignation" in c or "turnover" in c for c in df.columns.str.lower())
+    has_salary = any("salary" in c or "compensation" in c or "pay" in c or "wages" in c for c in df.columns.str.lower())
+    has_engagement = any("engagement" in c or "satisfaction" in c or "score" in c for c in df.columns.str.lower())
+    has_sales = any("sales" in c or "revenue" in c or "volume" in c for c in df.columns.str.lower())
+    has_profit = any("profit" in c or "margin" in c or "net" in c for c in df.columns.str.lower())
+    has_inventory = any("inventory" in c or "stock" in c for c in df.columns.str.lower())
+    has_dispatch = any("dispatch" in c or "receipt" in c or "issued" in c or "received" in c for c in df.columns.str.lower())
+    has_training = any("training" in c or "learn" in c or "course" in c for c in df.columns.str.lower())
+    has_performance = any("performance" in c or "rating" in c or "score" in c for c in df.columns.str.lower())
+
+    if has_attrition and has_salary:
+        causal_hints.append("Lower salary levels or compensation grades are often a primary driver of high attrition/resignation rates.")
+    if has_attrition and has_engagement:
+        causal_hints.append("Employee engagement/satisfaction scores are a leading indicator of resignation and attrition trends.")
+    if has_sales and has_profit:
+        causal_hints.append("Sales volumes and transaction counts are the direct drivers of overall revenue and profit margins.")
+    if has_inventory and has_dispatch:
+        causal_hints.append("Operational dispatch/issue rates directly drawdown opening stock levels, determining closing stock.")
+    if has_training and has_performance:
+        causal_hints.append("Structured training hours and curriculum completion rates influence employee performance ratings.")
+
+    # 3. Contradiction Seeds
+    contradiction_seeds = []
+    for col in df.columns:
+        cl = col.lower()
+        if "attrition" in cl or "resignation" in cl or "turnover" in cl:
+            contradiction_seeds.append(f"Verify if the attrition/turnover rate metric '{col}' matches corresponding columns or exit counts in other uploaded datasets.")
+        elif "sales" in cl or "revenue" in cl or "profit" in cl:
+            contradiction_seeds.append(f"Verify if Sales/Revenue/Profit totals for '{col}' match across different segment or financial reports.")
+        elif "stock" in cl or "inventory" in cl:
+            contradiction_seeds.append(f"Verify if opening/closing stock levels in '{col}' align with dispatch, receipts, or logistics records in other files.")
+            
+    return domain_map, causal_hints, contradiction_seeds
+
+
 def _summarize_df(df: pd.DataFrame, file_name: str = "") -> dict:
     df = df.dropna(how='all').reset_index(drop=True)
- 
+
     col_map = {c: _clean_col(str(c)) for c in df.columns}
     df = df.rename(columns=col_map)
- 
+
     numeric_cols   = df.select_dtypes(include='number').columns.tolist()
     text_cols      = df.select_dtypes(exclude='number').columns.tolist()
     useful_numeric = [c for c in numeric_cols
                       if not _is_id_column(df[c], c)]
- 
+
     df[numeric_cols] = df[numeric_cols].round(2)
- 
+
     stats: dict = {}
     for col in useful_numeric:
         stats[col] = {
@@ -394,7 +568,7 @@ def _summarize_df(df: pd.DataFrame, file_name: str = "") -> dict:
             "max":  round(float(df[col].max()),  2),
             "std":  round(float(df[col].std()),  2),
         }
- 
+
     chart_candidates: list[dict] = []
     for tcol in text_cols[:2]:
         for ncol in useful_numeric[:5]:
@@ -407,11 +581,57 @@ def _summarize_df(df: pd.DataFrame, file_name: str = "") -> dict:
                     "labels":    labels,
                     "values":    values,
                 })
- 
+
     # Enhancement 1: pass actual df so values are captured
     partial = {"type": "tabular", "columns": df.columns.tolist()}
     entities = extract_entities(partial, df=df)
- 
+
+    # 1. Compute entity-grouped statistics on full data
+    entity_stats = []
+    for etype, info in entities.items():
+        for ecol in info["columns"]:
+            if ecol in df.columns:
+                for ncol in useful_numeric:
+                    try:
+                        grouped = df.groupby(ecol)[ncol].agg(['mean', 'min', 'max', 'sum', 'count'])
+                        stats_dict = {}
+                        for val, row in grouped.iterrows():
+                            val_str = str(val).strip()
+                            if val_str and val_str not in ("nan", "None", ""):
+                                stats_dict[val_str] = {
+                                    "mean": round(float(row['mean']), 2) if pd.notnull(row['mean']) else 0.0,
+                                    "min": round(float(row['min']), 2) if pd.notnull(row['min']) else 0.0,
+                                    "max": round(float(row['max']), 2) if pd.notnull(row['max']) else 0.0,
+                                    "sum": round(float(row['sum']), 2) if pd.notnull(row['sum']) else 0.0,
+                                    "count": int(row['count'])
+                                }
+                        if stats_dict:
+                            entity_stats.append({
+                                "entity_type": etype,
+                                "entity_col": ecol,
+                                "numeric_col": ncol,
+                                "stats": stats_dict
+                            })
+                    except Exception as e:
+                        logger.warning(f"Failed to compute entity stats for {ecol} and {ncol}: {e}")
+
+    # 2. Identify period column and compute trend direction
+    period_col = None
+    for col in df.columns:
+        if _col_entity_type(col) == "period":
+            period_col = col
+            break
+            
+    trends = {}
+    if period_col:
+        for col in useful_numeric:
+            t = detect_trend_direction(df, period_col, col)
+            if t:
+                trends[col] = t
+                
+    # 3. Generate domain_map, causal_hints, and contradiction_seeds
+    domain_map, causal_hints, contradiction_seeds = _generate_metadata_heuristics(df, useful_numeric)
+
     return {
         "columns":          df.columns.tolist(),
         "row_count":        len(df),
@@ -422,6 +642,11 @@ def _summarize_df(df: pd.DataFrame, file_name: str = "") -> dict:
         "entities":         entities,
         "dataset_type":     file_name,
         "chart_candidates": chart_candidates,
+        "entity_stats":     entity_stats,
+        "trends":           trends,
+        "domain_map":       domain_map,
+        "causal_hints":     causal_hints,
+        "contradiction_seeds": contradiction_seeds,
     }
  
  
