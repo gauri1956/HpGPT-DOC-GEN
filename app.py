@@ -41,7 +41,7 @@ def allowed_file(filename):
  
 @app.route("/")
 def home():
-    return render_template("layout.html", chat_history=[], generated_content=None, download_url=None)
+    return render_template("layout.html", chat_history=[], generated_content=None, download_url=None, warnings=[])
  
  
 @app.route("/generate", methods=["POST"])
@@ -127,7 +127,8 @@ def generate():
             "layout.html",
             chat_history=[],
             generated_content=msg,
-            download_url=url_for("download", filename=output_filename)
+            download_url=url_for("download", filename=output_filename),
+            warnings=warnings
         )
  
     except Exception as e:
@@ -140,7 +141,8 @@ def generate():
             "layout.html",
             chat_history=[],
             generated_content=f"❌ Error: {err_msg}",
-            download_url=None
+            download_url=None,
+            warnings=[]
         )
     finally:
         for path in saved_paths:

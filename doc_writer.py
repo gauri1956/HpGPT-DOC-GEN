@@ -431,7 +431,7 @@ def generate_docx(body, output_path, title="Generated Document", chart_images=No
             _add_body_content(doc, content)
  
         for idx in assignments.get(sec_idx, []):
-            _, img_path = chart_images[idx]
+            img_path = chart_images[idx][1]
             _add_image(doc, img_path)
  
     if unplaced_idx:
@@ -443,7 +443,7 @@ def generate_docx(body, output_path, title="Generated Document", chart_images=No
         para.space_after = Pt(8)
  
         for idx in unplaced_idx:
-            _, img_path = chart_images[idx]
+            img_path = chart_images[idx][1]
             _add_image(doc, img_path)
  
     if is_official:
@@ -508,13 +508,16 @@ def _dedupe_charts(chart_images):
     seen_paths  = set()
     seen_titles = set()
     result = []
-    for ct, path in chart_images:
+    for chart in chart_images:
+        ct = chart[0]
+        path = chart[1]
+        col = chart[2] if len(chart) > 2 else ""
         norm_title = ct.lower().strip()
         if path in seen_paths or norm_title in seen_titles:
             continue
         seen_paths.add(path)
         seen_titles.add(norm_title)
-        result.append((ct, path))
+        result.append((ct, path, col))
     return result
  
  
@@ -603,11 +606,18 @@ def _assign_charts_to_sections(sections, chart_images):
     assignments = {}
     unplaced = []
  
-    for idx, (ct, img_path) in enumerate(chart_images):
+    for idx, chart in enumerate(chart_images):
+        ct = chart[0]
+        img_path = chart[1]
+        col = chart[2] if len(chart) > 2 else ""
+        
         if not os.path.exists(img_path):
             continue
  
         chart_kw = _keywords(ct)
+        if col:
+            chart_kw = chart_kw | _keywords(col)
+            
         if not chart_kw:
             unplaced.append(idx)
             continue

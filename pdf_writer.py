@@ -495,7 +495,7 @@ def generate_pdf(body, output_path="outputs/output.pdf",
 
         # Inline charts
         for idx in assignments.get(sec_idx, []):
-            _, img_path = chart_images[idx]
+            img_path = chart_images[idx][1]
             y = _place_chart(c, img_path, y)
 
         y -= 8
@@ -509,7 +509,8 @@ def generate_pdf(body, output_path="outputs/output.pdf",
                           TITLE_COLOR, underline=True)
         y -= 8
         for idx in unplaced_idx:
-            ct, img_path = chart_images[idx]
+            ct = chart_images[idx][0]
+            img_path = chart_images[idx][1]
             label  = _clean_col_name(ct)
             img_h  = _img_h(img_path)
             needed = img_h + 26
@@ -588,13 +589,16 @@ def _clean_bracketed_placeholders(text):
 
 def _dedupe_charts(chart_images):
     seen_paths, seen_titles, result = set(), set(), []
-    for ct, path in chart_images:
+    for chart in chart_images:
+        ct = chart[0]
+        path = chart[1]
+        col = chart[2] if len(chart) > 2 else ""
         norm_title = ct.lower().strip()
         if path in seen_paths or norm_title in seen_titles:
             continue
         seen_paths.add(path)
         seen_titles.add(norm_title)
-        result.append((ct, path))
+        result.append((ct, path, col))
     return result
 
 
@@ -924,10 +928,17 @@ def _assign_charts_to_sections(sections, chart_images):
     assignments = {}
     unplaced    = []
 
-    for idx, (ct, img_path) in enumerate(chart_images):
+    for idx, chart in enumerate(chart_images):
+        ct = chart[0]
+        img_path = chart[1]
+        col = chart[2] if len(chart) > 2 else ""
+        
         if not os.path.exists(img_path):
             continue
         chart_kw = _keywords(ct)
+        if col:
+            chart_kw = chart_kw | _keywords(col)
+            
         if not chart_kw:
             unplaced.append(idx)
             continue

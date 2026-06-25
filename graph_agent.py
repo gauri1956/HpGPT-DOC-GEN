@@ -146,7 +146,7 @@ def _generate_grouped_line_chart(group, file_name):
         )
         if 'path' in result:
             sig = tuple(round(sum(vals), 2) for vals in values_dict.values())
-            return (title, result['path'], sig)
+            return (title, result['path'], sig, ", ".join(c['value_col'] for c in group['columns']))
     except Exception as e:
         logger.warning(f"Grouped line chart failed: {e}")
     return None
@@ -198,7 +198,7 @@ def _charts_from_candidates(candidates, file_name):
             )
             if 'path' in result:
                 sig = tuple(round(v, 2) for v in values)
-                chart_images.append((title, result['path'], sig))
+                chart_images.append((title, result['path'], sig, vcol))
                 logger.info(f"Chart [{chart_type}]: {title} -> {result['path']}")
         except Exception as e:
             logger.warning(f"Chart generation failed for {title}: {e}")
@@ -306,7 +306,7 @@ def _comparable_groups_chart(candidates, file_name):
             )
             if 'path' in result:
                 sig = tuple(values)
-                extra.append((title, result['path'], sig))
+                extra.append((title, result['path'], sig, ", ".join(c['value_col'] for c in group['columns'])))
                 logger.info(f"Comparison chart [{file_name}]: {title} -> {result['path']}")
         except Exception as e:
             logger.warning(f"Comparison chart generation failed: {e}")
@@ -344,7 +344,7 @@ def generate_charts_from_markers(text):
             )
             if 'path' in r:
                 sig = tuple(round(float(v), 2) for v in m['values'])
-                chart_images.append((m.get('title', ''), r['path'], sig))
+                chart_images.append((m.get('title', ''), r['path'], sig, ""))
                 logger.info(f"Marker chart: {m.get('title')} -> {r['path']}")
         except Exception as e:
             logger.warning(f"Marker chart failed: {e}")
@@ -376,9 +376,14 @@ def dedup_charts(chart_list, seen_signatures=None, tolerance=0.01):
         seen_signatures = set()
  
     deduped = []
-    for title, path, sig in chart_list:
+    for chart in chart_list:
+        title = chart[0]
+        path = chart[1]
+        sig = chart[2]
+        col = chart[3] if len(chart) > 3 else ""
+        
         if not sig:
-            deduped.append((title, path, sig))
+            deduped.append((title, path, sig, col))
             continue
  
         is_dup = sig in seen_signatures
@@ -395,7 +400,7 @@ def dedup_charts(chart_list, seen_signatures=None, tolerance=0.01):
             continue
  
         seen_signatures.add(sig)
-        deduped.append((title, path, sig))
+        deduped.append((title, path, sig, col))
  
     return deduped, seen_signatures
  

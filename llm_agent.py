@@ -82,17 +82,34 @@ _REPORT_CORE_RULES = (
     "LANGUAGE VARIETY -- CRITICAL:\n"
     "- Do not overuse phrases like 'could indicate', 'indicating a', 'this suggests'.\n"
     "- Vary sentence openers and verbs across the whole document.\n"
-    "\n"
-    "CONSULTANT-GRADE FINDINGS -- CRITICAL:\n"
+)
+
+_CORE_RULES = _BASE_CORE_RULES + _REPORT_CORE_RULES
+
+_REPORT_SPECIFIC_RULES = (
+    "\nREPORT-SPECIFIC FINDINGS & RIGOR -- CRITICAL:\n"
     "- For every finding or key insight in the report, you MUST structure it using this format:\n"
     "  * **Observation**: [Brief sentence describing what happened]\n"
     "  * **Evidence**: [The exact numbers, values, or percentage growths from the data]\n"
     "  * **Why it matters**: [The operational/business impact or risk]\n"
     "  * **Recommended action**: [The specific qualitative next step]\n"
     "- When stating any correlation or trend, you MUST explicitly output the Pearson correlation coefficient (r = X.XX) and confidence/strength label (Insight Strength: [Very High/High/Medium]) as given in the prompt context. Never speak vaguely about correlations without providing these exact values.\n"
+    "- These findings formatting rules apply ONLY to reports and analytical documents. Do NOT use them in training or SOP documents.\n"
 )
 
-_CORE_RULES = _BASE_CORE_RULES + _REPORT_CORE_RULES
+_TRAINING_SPECIFIC_RULES = (
+    "\nTRAINING-SPECIFIC CONTENT RULES -- CRITICAL:\n"
+    "- Focus on instructional, educational, and onboarding content. Structure learning/onboarding paths with clear pre-onboarding, onboarding, and post-onboarding stages.\n"
+    "- Do NOT include analytical report sections, KPI dashboards, or report-specific findings layouts.\n"
+    "- NEVER use report-specific formatting labels like 'Observation', 'Evidence', 'Why it matters', 'Recommended action', 'Insight Strength', or 'Pearson correlation coefficient'. These report labels are strictly forbidden in training materials.\n"
+)
+
+_SOP_SPECIFIC_RULES = (
+    "\nSOP / PROCEDURE MANUAL CONTENT RULES -- CRITICAL:\n"
+    "- Focus on standard operating procedures, roles, timelines, and sequential process steps.\n"
+    "- Do NOT include analytical report sections or report-specific findings layouts.\n"
+    "- NEVER use report-specific formatting labels like 'Observation', 'Evidence', 'Why it matters', 'Recommended action', 'Insight Strength', or 'Pearson correlation coefficient'. These report labels are strictly forbidden in SOPs.\n"
+)
  
 # -- Grounding + analytical reasoning rules ------------------------------------
 _BASE_GROUNDING_RULES = (
@@ -172,11 +189,28 @@ _SHARED_RULES = _CORE_RULES + _GROUNDING_RULES
  
 # -- Data rules for NOINPUT prompts -------------------------------------------
 _NOINPUT_DATA_RULES = (
-    "\nDATA RULES FOR NO-FILE / ILLUSTRATIVE REPORTS -- CRITICAL:\n"
-    "- No source data file has been uploaded. You are generating an illustrative document based on assumptions.\n"
-    "- ALL numerical values, KPIs, compliance rates, percentages, forecasts, and risk scores you generate MUST be explicitly marked as hypothetical estimates.\n"
-    "- You MUST include a prominent 'Assumptions & Disclaimer' section at the very beginning stating all metrics are hypothetical.\n"
-    "- Do NOT leave any unresolved placeholder values. All placeholders must be resolved to illustrative scenario values.\n"
+    "\nDATA RULES FOR NO-FILE GENERATIONS -- CRITICAL:\n"
+    "- No source data file has been uploaded. Generate a structurally correct document framework using professional placeholders and guidance notes where information is unavailable. Do not create assumptions that appear to be facts.\n"
+    "- PRIORITY HIERARCHY FOR RESOLVING INFORMATION:\n"
+    "  1. Use uploaded data (if present)\n"
+    "  2. Use explicit prompt information\n"
+    "  3. Use placeholders (underlines, generic fallback text)\n"
+    "  4. Never invent facts\n"
+    "- Since NO source files are provided, you MUST adhere to the following rules to prevent fabrication/hallucination:\n"
+    "  * Prefer placeholders over examples when information is unavailable.\n"
+    "  * If a section normally requires factual information that is unavailable, you MUST keep the section to preserve document structure, but replace its contents with placeholders or specific text like: 'To be provided by the concerned department.'\n"
+    "  * Do NOT invent dates (e.g., use 'Effective Date: __________' or standard underlines 'Date: __________________').\n"
+    "  * Do NOT invent reference numbers or letter numbers (e.g., use 'Ref No.: __________________' or state 'vide letter/circular ref: __________________').\n"
+    "  * Do NOT invent historical correspondence or prior references (e.g., state 'No historical correspondence is referenced' or use blank underlines).\n"
+    "  * Do NOT invent committee members, names, or specific designations (e.g., write 'Committee composition shall be notified separately' or use underlines).\n"
+    "  * Do NOT invent specific products, equipment names, quantities, or cost estimates (like 'Warehouse Management System' or 'Automated Inventory Scanner'). Instead, write: 'Detailed technical specifications shall be finalized by the user department.'\n"
+    "  * Do NOT invent numerical KPI values, accuracy rates, fill rates, or turnover ratios. Do NOT use words like 'estimated 95%', 'hypothetical 95%', 'illustrative 95%', 'sample KPI', or 'assumed KPI'. Write instead: 'KPI metrics shall be determined based on operational requirements' or use blank underlines/descriptive text.\n"
+    "  * Do NOT invent costs, budgets, or specific figures (e.g., write 'Estimated Cost: Rs. __________________').\n"
+    "  * The issuing authority or organization must remain HPCL (or relevant HPCL departments like 'Information Systems Department, HPCL Corporate Office') and NOT invent external government ministries or departments (like Ministry of Electronics and Information Technology or Ministry of Petroleum and Natural Gas) unless explicitly provided in the prompt.\n"
+    "- Do NOT leave any realistic-looking fabricated numbers, dates, or names. Use professional underlines (__________________) or the specific phrases above instead.\n"
+    "- DISCLAIMER APPLICABILITY:\n"
+    "  * Include a prominent 'Assumptions & Disclaimer' section at the very beginning ONLY for: Business Reports (business_report), Policy Documents (policy_document), SOPs (sop), and Training Materials (training_material).\n"
+    "  * Do NOT generate or force an 'Assumptions & Disclaimer' section for: Office Memorandums (office_memorandum), Circulars (circular), Office Orders (office_order), File Notes (file_note), or Purchase Notes (purchase_note). Placeholders are sufficient for these document types.\n"
 )
  
 # -- Multi-file rules ----------------------------------------------------------
@@ -602,17 +636,14 @@ SYSTEM_PROMPTS = {
     ),
  
     "pptx": (
-        "You are an expert PowerPoint presentation generator. Customize branding and terminology "
-        "to match the organization and domain of the input files or user request. "
-        "Generate concise, slide-ready content.\n\n"
-        "SLIDE STRUCTURE RULES:\n"
-        "1. Use ## for each slide heading -- each ## becomes exactly one slide.\n"
-        "2. Write 4 to 6 bullet points per slide using - \n"
-        "3. Each bullet must be ONE complete sentence, maximum 20 words.\n"
-        "4. NEVER write ## Title Page, ## Acknowledgement, ## Thank You.\n"
-        "5. Total ## sections must be between 10 and 14.\n"
-        "6. Every bullet must contain a real insight, number, or recommendation.\n"
-        "7. Each slide must cover a DISTINCT topic with no substantial overlap.\n"
+        "You are an expert PowerPoint presentation designer. Enforce strict slide-ready discipline:\n"
+        "1. SLIDE STRUCTURE: Use ## for each slide heading. Each ## heading becomes exactly one slide. Do not group multiple slides under one ## heading.\n"
+        "2. BULLETS LIMIT: Provide exactly 3 to 5 bullet points per slide using the '-' syntax.\n"
+        "3. STRICT LENGTH LIMIT: Each bullet point must be a single, direct sentence, containing a maximum of 18 words. Avoid sub-bullets or multiple sentences in a single bullet.\n"
+        "4. ONE CHART PER SLIDE: If the slide contains or refers to numerical data, embed exactly one chart marker in the format: [CHART: <Title of Chart>] immediately after the ## heading or bullet list. Never write more than one chart marker per slide.\n"
+        "5. SPEAKER NOTES MANDATORY: For every single slide, you MUST write detailed speaker notes. Format them as `Speaker Notes: <detailed paragraph describing the slide contents, statistics, and business implications in depth>` on a new line after the slide bullets.\n"
+        "6. NO WRAPPER SLIDES: Never write ## Title Page, ## Acknowledgement, or ## Thank You slides.\n"
+        "7. SLIDE COUNT: Ensure the presentation contains between 10 and 14 slides (## headings) in total, each covering a distinct analytical topic with no overlap."
     ),
  
     "official_doc": (
@@ -668,7 +699,7 @@ SYSTEM_PROMPTS = {
         "You are an expert enterprise document writer. "
         "The user wants a document created from scratch with no source data.\n\n"
         "FORMATTING:\n"
-        "- The first section MUST be ## Assumptions & Disclaimer.\n"
+        "- If required by the Disclaimer Applicability rules, the first section MUST be ## Assumptions & Disclaimer.\n"
         "- Use ## for section headings, ### for subsections.\n"
         "- Be specific and realistic -- no generic filler content.\n"
         "- Minimum 6 sections, each with meaningful, domain-appropriate content.\n"
@@ -679,7 +710,7 @@ SYSTEM_PROMPTS = {
         "You are an expert enterprise PDF writer. "
         "The user wants a PDF document from scratch with no source data.\n\n"
         "FORMATTING:\n"
-        "- The first section MUST be ## Assumptions & Disclaimer.\n"
+        "- If required by the Disclaimer Applicability rules, the first section MUST be ## Assumptions & Disclaimer.\n"
         "- Use ## for major sections, ### for subsections.\n"
         "- Be specific and realistic -- no generic filler content.\n"
         "- Minimum 6 sections with meaningful depth.\n"
@@ -687,15 +718,13 @@ SYSTEM_PROMPTS = {
     ),
  
     "pptx_noinput": (
-        "You are an expert PowerPoint generator. "
-        "The user wants a presentation from scratch with no source data.\n\n"
-        "SLIDE RULES:\n"
-        "1. Use ## for each slide heading -- 10 to 14 slides total.\n"
-        "2. Write 4 to 6 bullets per ## using - \n"
-        "3. Each bullet max 20 words, one complete sentence.\n"
-        "4. NEVER write ## Title Page, ## Acknowledgement, ## Thank You.\n"
-        "5. The FIRST slide must be ## Assumptions & Disclaimer.\n"
-        "6. Do NOT generate [CHART: ...] markers.\n"
+        "You are an expert PowerPoint presentation designer. Enforce strict slide-ready discipline:\n"
+        "1. SLIDE STRUCTURE: Use ## for each slide heading. Each ## heading becomes exactly one slide.\n"
+        "2. BULLETS LIMIT: Provide exactly 3 to 5 bullet points per slide using the '-' syntax.\n"
+        "3. STRICT LENGTH LIMIT: Each bullet point must be a single, direct sentence, containing a maximum of 18 words.\n"
+        "4. SPEAKER NOTES MANDATORY: For every single slide, you MUST write detailed speaker notes. Format them as `Speaker Notes: <detailed paragraph describing the slide contents, statistics, and business implications in depth>` on a new line after the slide bullets.\n"
+        "5. NO WRAPPER SLIDES: Never write ## Title Page, ## Acknowledgement, or ## Thank You slides.\n"
+        "6. SLIDE COUNT: Ensure the presentation contains between 10 and 14 slides (## headings) in total."
     ),
  
     "plan": (
@@ -723,15 +752,23 @@ def get_system_prompt(output_type: str, doc_type: str = None, has_files: bool = 
     if doc_type in _OFFICIAL_DOC_TYPES:
         return SYSTEM_PROMPTS["official_doc"] + "\n\n" + _BASE_CORE_RULES
  
+    spec_rules = ""
+    is_analytical = doc_type in ("business_report", "financial_report", "operational", "analytical")
+    if is_analytical:
+        spec_rules = _REPORT_SPECIFIC_RULES
+    elif doc_type == "training_material":
+        spec_rules = _TRAINING_SPECIFIC_RULES
+    elif doc_type == "sop":
+        spec_rules = _SOP_SPECIFIC_RULES
+
     if not has_files:
         key = f"{output_type}_noinput"
         prompt = SYSTEM_PROMPTS.get(key, SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"]))
-        return prompt + "\n\n" + _CORE_RULES + "\n\n" + _NOINPUT_DATA_RULES
+        return prompt + "\n\n" + _CORE_RULES + "\n\n" + spec_rules + "\n\n" + _NOINPUT_DATA_RULES
         
     prompt = SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"])
-    rules  = _CORE_RULES + "\n\n" + _BASE_GROUNDING_RULES
+    rules  = _CORE_RULES + "\n\n" + _BASE_GROUNDING_RULES + "\n\n" + spec_rules
     
-    is_analytical = doc_type in ("business_report", "financial_report", "operational", "analytical")
     if is_analytical:
         rules += "\n\n" + _ANALYTICAL_RULES
         
@@ -762,6 +799,16 @@ def get_cross_file_rules() -> str:
  
 def is_official_doc_type(doc_type: str) -> bool:
     return doc_type in _OFFICIAL_DOC_TYPES
+
+
+def _get_max_tokens(doc_type: str, is_combined: bool, output_type: str) -> int:
+    if doc_type and doc_type in _OFFICIAL_DOC_TYPES:
+        return 4096   # official docs need full sections
+    if is_combined:
+        return 4096   # integrated report across multiple files
+    if output_type == "pptx":
+        return 1536   # slides are short
+    return 2048       # single-file digest
  
  
 def query_llama(prompt: str, output_type: str = "docx",
@@ -781,10 +828,7 @@ def query_llama(prompt: str, output_type: str = "docx",
             f"doc_type='{doc_type}', has_files={has_files}"
         )
  
-    if doc_type and doc_type in _OFFICIAL_DOC_TYPES:
-        max_tokens = 2048
-    else:
-        max_tokens = 2048 if is_combined else 1536
+    max_tokens = _get_max_tokens(doc_type, is_combined, output_type)
  
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",

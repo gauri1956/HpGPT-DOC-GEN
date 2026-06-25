@@ -60,7 +60,11 @@ _INTENT_INSTRUCTIONS = {
     ),
 }
  
-# -- Base digest prompt --------------------------------------------------------
+# -- Base digest prompt -------------------------------------------------------
+# KEY CHANGE: Each bullet now requires a [src: ...] tag so the orchestrator's
+# _validate_digest() can check that every numeric claim has a traceable source.
+# This is the structured output enforcement — no extra LLM call, just a format
+# constraint added to the existing digest prompt.
 _BASE_DIGEST_PROMPT = """
 You are a data digest agent. You receive structured data extracted from ONE file and
 must extract FACTS ONLY for use by another agent that will write the final report.
@@ -74,10 +78,28 @@ STRICT RULES:
 - NEVER estimate, infer, or invent a metric unless it is literally computable from
   numbers given in the data via a stated calculation.
 - Round numbers to at most 1 decimal place.
+ 
+SOURCE TAGGING -- MANDATORY:
+- Every bullet that contains a number MUST end with a source tag in this exact format:
+  [src: <column or sheet name>]
+  Examples:
+    - Total Petrol Sales (KL) across all months is 4,820 KL. [src: Petrol KL]
+    - Average Salary in Finance department is Rs. 72,000. [src: Salary, Department]
+    - Opening Stock of Diesel in April is 1,200 MT. [src: Opening Stock, Sheet: April]
+- If a number comes from a calculation across columns, list all source columns:
+  [src: Opening Stock + Received - Issued]
+- For text/policy files with no numbers, the [src:] tag is not required.
+- CONFIDENCE: If a metric is derived (not directly in a cell) add [conf: derived].
+  If directly read from a cell, add [conf: direct]. Example:
+  - Attrition rate is 12.3% based on resignations vs headcount. [src: Attrition, Headcount] [conf: derived]
+ 
+CHART RULES:
 - Where a chart adds value, insert it on its own line:
   [CHART: bar | title=Salary by Employee | labels=Rahul,Priya,Amit | values=65000,55000,72000 | y_label=Salary]
   Only chart numeric data actually present in the data.
 - Do NOT generate charts for ID columns, serial numbers, or index columns.
+ 
+OTHER RULES:
 - Do NOT mention internal terms like "chart candidates", "numeric columns", filenames, or UUIDs.
 - IMPORTANT: The "Instruction" below may describe a full multi-section report. IGNORE
   that structure -- it applies to the FINAL report. This step ONLY extracts facts.
@@ -242,13 +264,89 @@ def _build_digest_prompt(intent: str) -> str:
     return _BASE_DIGEST_PROMPT.strip() + "\n\n" + intent_block.strip()
  
  
+# ==============================================================================
+# NEW: strip [src:] and [conf:] tags from digest before passing to run_insight
+# The tags are for validation only — they should not appear in the final report.
+# ==============================================================================
+ 
+def _strip_digest_tags(digest_text: str) -> str:
+    """
+    Remove [src: ...] and [conf: ...] tags from digest text.
+    Called before digest_results are passed to run_insight() so the LLM
+    doesn't see or reproduce the internal validation tags in the final document.
+    """
+    cleaned = re.sub(r'\[src:[^\]]*\]', '', digest_text)
+    cleaned = re.sub(r'\[conf:[^\]]*\]', '', cleaned)
+    # Tidy up any double spaces left behind
+    cleaned = re.sub(r'  +', ' ', cleaned)
+    return cleaned.strip()
+ 
+ 
+# ==============================================================================
+# NEW: extract structured facts from digest for validation
+# ==============================================================================
+ 
+def _extract_digest_facts(digest_text: str, file_name: str) -> list[dict]:
+    """
+    Parse digest bullets into structured fact records.
+ 
+    Each record:
+        {
+            "text":       str,    # full bullet text
+            "has_number": bool,   # contains a numeric value
+            "has_src":    bool,   # has [src: ...] tag
+            "confidence": str,    # "direct" | "derived" | "unknown"
+            "src_ref":    str,    # extracted source reference
+            "file":       str,    # source file name
+            "supported":  bool,   # True if has_number -> has_src
+        }
+ 
+    Used by orchestrator._validate_digest() for structured checking.
+    """
+    facts = []
+    lines = [l.strip() for l in digest_text.splitlines() if l.strip().startswith("- ")]
+ 
+    for line in lines:
+        has_number = bool(re.search(r'\b\d+[\.,]?\d*\b', line))
+ 
+        src_match = re.search(r'\[src:\s*([^\]]+)\]', line, re.IGNORECASE)
+        has_src   = src_match is not None
+        src_ref   = src_match.group(1).strip() if src_match else ""
+ 
+        conf_match = re.search(r'\[conf:\s*(\w+)\]', line, re.IGNORECASE)
+        confidence = conf_match.group(1).lower() if conf_match else "unknown"
+ 
+        # A claim is supported if it either has no number (text fact)
+        # or has a number AND a [src:] tag
+        supported = (not has_number) or has_src
+ 
+        facts.append({
+            "text":       line,
+            "has_number": has_number,
+            "has_src":    has_src,
+            "confidence": confidence,
+            "src_ref":    src_ref,
+            "file":       file_name,
+            "supported":  supported,
+        })
+ 
+    return facts
+ 
+ 
 def run_analysis(data, instruction, intent: str = None, dataset_role: str = None,
-                 causal_hints: list = None):
+                 causal_hints: list = None, prior_digests_summary: str = None):
     """
     Extract a fact-digest from a single dataset. Output is bullet points with
     real numbers (and optional chart markers) -- no report structure.
  
+    KEY CHANGE: digest now includes [src: <column>] and [conf: direct|derived]
+    tags on every numeric bullet. These tags allow the orchestrator's
+    _validate_digest() to do structured validation without an extra LLM call.
+    The tags are stripped before digest_results are passed to run_insight().
+ 
     Returns: (digest_text, intent)
+        digest_text: raw tagged digest (tags stripped by caller before run_insight)
+        intent:      detected or passed-in intent string
     """
     from data_agent import detect_content_intent
  
@@ -266,7 +364,24 @@ def run_analysis(data, instruction, intent: str = None, dataset_role: str = None
         )
  
     digest_prompt = _build_digest_prompt(intent)
-    data_summary  = json.dumps(data, indent=2, default=str)[:5000]
+    
+    if isinstance(data, dict) and data.get("type") in ("tabular", "multi_sheet"):
+        smart_data = {
+            "file": data.get("file"),
+            "type": data.get("type"),
+            "columns": data.get("columns"),
+            "stats": data.get("stats"),
+            "entity_stats": data.get("entity_stats"),
+            "trends": data.get("trends"),
+            "sample": data.get("sample"),
+        }
+        if "sheets_summary" in data:
+            smart_data["sheets_summary"] = data["sheets_summary"]
+        if "cross_sheet_entities" in data:
+            smart_data["cross_sheet_entities"] = data["cross_sheet_entities"]
+        data_summary = json.dumps(smart_data, indent=2, default=str)
+    else:
+        data_summary = json.dumps(data, indent=2, default=str)[:8000]
  
     prompt_lines = [
         f"Instruction (for context only -- see rules above about ignoring its "
@@ -294,6 +409,13 @@ def run_analysis(data, instruction, intent: str = None, dataset_role: str = None
             + "\n".join(trend_lines)
         )
  
+    if prior_digests_summary:
+        prompt_lines.append(
+            "PRIOR DIGESTS SUMMARY (Do NOT repeat or duplicate the findings, trends, or facts "
+            "already captured in these previous files. Focus on new, unique insights, or contrast "
+            "them with these prior findings):\n" + prior_digests_summary
+        )
+
     prompt_lines.append(f"Data:\n{data_summary}")
     prompt = "\n\n".join(prompt_lines)
  
@@ -309,9 +431,10 @@ def run_insight(all_results, user_prompt, output_format="pdf",
     """
     Build the SINGLE integrated report from all per-file digests.
  
-    KEY FIX: When official_format_spec is present, doctype_rules are NOT
-    injected separately -- doing so caused duplicate structure injection
-    which confused the LLM and produced template-like output for Purchase Notes.
+    KEY CHANGE: digest texts are stripped of [src:] and [conf:] tags before
+    being passed to the LLM. This prevents the internal validation tags from
+    appearing in the final document while keeping them available for the
+    orchestrator's pre-call validation pass.
  
     Args:
         all_results          : list of (digest_text, intent) tuples from run_analysis()
@@ -325,11 +448,14 @@ def run_insight(all_results, user_prompt, output_format="pdf",
     """
     # Support both (text, intent) tuples and plain strings
     if all_results and isinstance(all_results[0], tuple):
-        digests = [r[0] for r in all_results]
-        intents = [r[1] for r in all_results]
+        raw_digests = [r[0] for r in all_results]
+        intents     = [r[1] for r in all_results]
     else:
-        digests = all_results
-        intents = ["analytical"] * len(all_results)
+        raw_digests = all_results
+        intents     = ["analytical"] * len(all_results)
+ 
+    # Strip [src:] / [conf:] tags — these are for validation only, not for the LLM
+    digests = [_strip_digest_tags(d) for d in raw_digests]
  
     dominant_intent = (
         Counter(intents).most_common(1)[0][0] if intents else "analytical"
@@ -338,24 +464,20 @@ def run_insight(all_results, user_prompt, output_format="pdf",
  
     effective_type = doc_type or dominant_intent
  
-    # -- FIX: Only inject doctype_rules when official_format_spec is NOT present.
-    # For official doc types, the format spec already contains the full structure.
-    # Injecting doctype_rules ON TOP of official_format_spec causes the LLM to
-    # see the same structure twice with minor wording differences -> confused output.
     is_official = effective_type in {
         "file_note", "office_memorandum", "office_notice",
         "circular", "purchase_note", "office_order"
     }
  
     if official_format_spec and is_official:
-        # Official doc: use format spec ONLY -- no separate doctype_rules
         doctype_rules = ""
-        logger.info(f"[run_insight] Official doc type '{effective_type}': skipping separate doctype_rules injection.")
+        logger.info(
+            f"[run_insight] Official doc type '{effective_type}': "
+            f"skipping separate doctype_rules injection."
+        )
     else:
-        # Standard doc: use doctype_rules as usual
         doctype_rules = get_doctype_rules(effective_type)
  
-    # Get narrative intent instruction
     intent_instruction = _INSIGHT_INTENT_INSTRUCTIONS.get(
         effective_type,
         _INSIGHT_INTENT_INSTRUCTIONS.get(
@@ -364,26 +486,13 @@ def run_insight(all_results, user_prompt, output_format="pdf",
         )
     )
  
-    # Combine per-file digests
     combined = "\n\n---\n\n".join(
         f"Facts from dataset {i + 1}:\n{digest}"
         for i, digest in enumerate(digests)
     )[:3500]
  
-    # -- Build the full prompt -------------------------------------------------
-    # Structure:
-    #   1. User request
-    #   2. Official format spec (if present) -- MANDATORY structure for PSU doc types
-    #   3. Cross-file intelligence context (if present)
-    #   4. Cross-file rules (if context present)
-    #   5. Intent instruction -- how to treat the data
-    #   6. Doc-type structure rules -- ONLY if not official (to avoid duplication)
-    #   7. Data grounding instructions
-    #   8. Per-file digests
- 
     prompt_parts = [user_prompt.strip()]
  
-    # Inject official format spec FIRST so LLM sees the mandatory structure
     if official_format_spec and official_format_spec.strip():
         prompt_parts.append(official_format_spec.strip())
         logger.info(
@@ -410,13 +519,10 @@ def run_insight(all_results, user_prompt, output_format="pdf",
  
     prompt_parts.append(intent_instruction)
  
-    # Only inject doctype_rules for non-official docs
     if doctype_rules:
         prompt_parts.append(doctype_rules)
  
-    # Data grounding instruction
     if is_official and digests and any(d.strip() for d in digests):
-        # For official docs with uploaded files, tell LLM to use the file facts
         prompt_parts.append(
             f"The following fact-digests were extracted from {len(digests)} uploaded file(s). "
             f"Incorporate any relevant facts, specifications, quantities, or figures from these "

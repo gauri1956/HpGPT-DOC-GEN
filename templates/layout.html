@@ -180,6 +180,63 @@
         .flash.danger { background: #ffeaea; color: #c00; border: 1px solid #f5c6cb; }
         .flash.warning { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
  
+        /* Quality Report Panel */
+        .quality-report-panel {
+            margin-top: 20px;
+            border: 1.5px solid #ffeeba;
+            border-radius: 10px;
+            background: #fffdf5;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0,32,91,0.05);
+            transition: all 0.3s;
+        }
+        .quality-report-toggle {
+            width: 100%;
+            padding: 14px 20px;
+            background: #fff3cd;
+            border: none;
+            color: #856404;
+            font-size: 0.95em;
+            font-weight: 700;
+            text-align: left;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .quality-report-toggle:hover {
+            background: #ffeeba;
+        }
+        .quality-report-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+        }
+        .quality-report-content.open {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .warning-list {
+            margin: 0;
+            padding: 16px 20px 16px 36px;
+            color: #856404;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+        .warning-list li {
+            margin-bottom: 8px;
+        }
+        .warning-list li:last-child {
+            margin-bottom: 0;
+        }
+        .toggle-icon {
+            transition: transform 0.3s;
+        }
+        .toggle-icon.rotated {
+            transform: rotate(180deg);
+        }
+
         @media (max-width: 900px) {
             .container { flex-direction: column; }
             .sidebar { width: 100%; }
@@ -249,6 +306,22 @@
             {% if download_url %}
             <div class="generated-document">
                 <a class="download-link" href="{{ download_url }}">Download Output Document</a>
+            </div>
+            {% endif %}
+
+            {% if warnings %}
+            <div class="quality-report-panel">
+                <button class="quality-report-toggle" onclick="toggleQualityReport()">
+                    <span>📋 Quality Report ({{ warnings|length }} Warning{{ 's' if warnings|length > 1 else '' }})</span>
+                    <span class="toggle-icon">▼</span>
+                </button>
+                <div class="quality-report-content" id="quality-report-content">
+                    <ul class="warning-list">
+                        {% for w in warnings %}
+                            <li>{{ w }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
             </div>
             {% endif %}
         </section>
@@ -390,6 +463,13 @@
         overlay.classList.add('active');
         document.getElementById('gen-btn').disabled = true;
     });
+
+    function toggleQualityReport() {
+        const content = document.getElementById('quality-report-content');
+        const icon = document.querySelector('.toggle-icon');
+        content.classList.toggle('open');
+        icon.classList.toggle('rotated');
+    }
 </script>
 </body>
 </html>

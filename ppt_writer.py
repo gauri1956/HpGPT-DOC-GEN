@@ -84,7 +84,7 @@ def generate_ppt(content, output_path="outputs/output.pptx",
     sections = _parse(content)[:MAX_SLIDES]
  
     placed = set()
-    for sec_title, bullets, slide_type in sections:
+    for sec_title, bullets, slide_type, notes in sections:
         if not bullets:
             continue
  
@@ -104,6 +104,12 @@ def generate_ppt(content, output_path="outputs/output.pptx",
         sl = _blank(prs)
         _title_bar(sl, sec_title)
         _footer(sl, filename_title)
+
+        if notes:
+            try:
+                sl.notes_slide.notes_text_frame.text = notes
+            except Exception as note_err:
+                logger.warning(f"Failed to set speaker notes: {note_err}")
  
         # ── Slide-type-aware layout ───────────────────────────────────────────
         # The LLM marks special slides in the parsed output; we use those
@@ -764,13 +770,13 @@ def _split_sentences(text):
  
 def _parse(content):
     """
-    Parse LLM markdown into (title, bullets, slide_type) triples.
+    Parse LLM markdown into (title, bullets, slide_type, notes) quadruples.
     slide_type is detected from the heading for layout-aware rendering.
     """
     global _seen_headings
     lines = content.splitlines()
     raw_sections = []
-    cur_title, cur_bullets, cur_type = "Overview", [], "content"
+    cur_title, cur_bullets, cur_type, cur_notes = "Overview", [], "content", ""
  
     for line in lines:
         s = line.strip()
@@ -778,16 +784,23 @@ def _parse(content):
         if re.match(r'^\[CHART:', s, re.IGNORECASE):
             continue
  
+        if s.lower().startswith("speaker notes:") or s.lower().startswith("notes:") or s.lower().startswith("[notes:"):
+            notes_line = re.sub(r'^(speaker notes|notes|\[notes):\s*', '', s, flags=re.IGNORECASE)
+            notes_line = notes_line.rstrip(']')
+            cur_notes += (" " if cur_notes else "") + notes_line
+            continue
+
         m = re.match(r'^(#{1,3})\s+(.+)$', s)
         if m:
             if cur_bullets and cur_title is not None:
-                raw_sections.append((cur_title, cur_bullets[:], cur_type))
+                raw_sections.append((cur_title, cur_bullets[:], cur_type, cur_notes))
             heading = re.sub(r'[*_]+', '', m.group(2)).strip()
  
             if _FILTERED_HEADINGS.match(heading):
                 cur_title = None
                 cur_bullets = []
                 cur_type = "content"
+                cur_notes = ""
                 continue
  
             heading_key = re.sub(r'\s+', ' ', heading.lower().strip())
@@ -795,12 +808,14 @@ def _parse(content):
                 cur_title = None
                 cur_bullets = []
                 cur_type = "content"
+                cur_notes = ""
                 continue
             _seen_headings.add(heading_key)
  
             cur_title   = heading
             cur_bullets = []
             cur_type    = _detect_slide_type(heading)
+            cur_notes   = ""
             continue
  
         if cur_title is None: continue
@@ -817,17 +832,19 @@ def _parse(content):
                 cur_bullets.append(sent)
  
     if cur_bullets and cur_title is not None:
-        raw_sections.append((cur_title, cur_bullets, cur_type))
+        raw_sections.append((cur_title, cur_bullets, cur_type, cur_notes))
  
     # ── Merge small sections ──────────────────────────────────────────────────
     merged, i = [], 0
     while i < len(raw_sections):
-        title, bullets, stype = raw_sections[i]
+        title, bullets, stype, notes = raw_sections[i]
         while (len(bullets) < 4 and i + 1 < len(raw_sections)
                and len(merged) < MAX_SLIDES):
-            nt, nb, ntype = raw_sections[i+1]
+            nt, nb, ntype, nnotes = raw_sections[i+1]
             if stype == "content" and ntype == "content" and len(bullets) + len(nb) <= MAX_BULLETS:
                 bullets = bullets + nb
+                if nnotes:
+                    notes += ("\n" if notes else "") + nnotes
                 i += 1
             else:
                 break
@@ -835,10 +852,10 @@ def _parse(content):
             mid = min((len(bullets) + 1) // 2, MAX_BULLETS)
             if len(bullets) - mid < 2:
                 mid = max(2, len(bullets) - 2)
-            merged.append((title, bullets[:mid], stype))
-            merged.append((title + " (cont.)", bullets[mid:], "content"))
+            merged.append((title, bullets[:mid], stype, notes))
+            merged.append((title + " (cont.)", bullets[mid:], "content", notes))
         else:
-            merged.append((title, bullets, stype))
+            merged.append((title, bullets, stype, notes))
         i += 1
  
     return merged
