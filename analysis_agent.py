@@ -369,6 +369,22 @@ def _extract_digest_facts(digest_text: str, file_name: str) -> list[dict]:
     return facts
  
  
+def _validate_digest(digest_text: str, file_name: str) -> list[str]:
+    """
+    Validate digest text by ensuring every numeric claim has a [src:] tag.
+    Returns a list of warning strings for any unsupported claims.
+    """
+    warnings = []
+    facts = _extract_digest_facts(digest_text, file_name)
+    for fact in facts:
+        if not fact["supported"]:
+            warnings.append(
+                f"Validation Warning: Numeric claim in '{file_name}' digest lacks a source reference: "
+                f"\"{fact['text']}\""
+            )
+    return warnings
+ 
+ 
 def run_analysis(data, instruction, intent: str = None, dataset_role: str = None,
                  causal_hints: list = None, prior_digests_summary: str = None):
     """

@@ -185,9 +185,7 @@ def _clean_name(raw_name):
 def _display_name(name):
     return (name.replace('.xlsx', '').replace('.csv', '').replace('.pdf', '')
                 .replace('.docx', '').replace('.txt', '').replace('_', ' ').strip())
- 
- 
-def _calculate_validation_length(text: str) -> int:
+ def _calculate_validation_length(text: str) -> int:
     """
     Calculate the length of the text for validation, excluding:
     - Tables (lines containing '|')
@@ -208,12 +206,29 @@ def _calculate_validation_length(text: str) -> int:
     
     cleaned_text = "\n".join(cleaned_lines).strip()
     return len(cleaned_text)
- 
- 
+
+
+def _clean_heading(h: str) -> str:
+    """
+    Normalize heading for matching by removing leading hashes, markdown tags (*, _),
+    numbering (e.g. "1. ", "1.1 "), and trimming/lowercasing.
+    """
+    if not h:
+        return ""
+    h_clean = h.lower()
+    # Strip markdown headers (e.g., #, ##, ###)
+    h_clean = re.sub(r'^#+\s*', '', h_clean)
+    # Strip leading numbering/letters patterns like "1. ", "A. ", "1.1. "
+    h_clean = re.sub(r'^[a-z0-9\.\-\)]+\s+', '', h_clean)
+    # Strip markdown formatting
+    h_clean = h_clean.replace('*', '').replace('_', '')
+    return h_clean.strip()
+
+
 def _get_section_contents(body: str) -> dict[str, str]:
     """
     Parse a markdown body and extract content for each heading.
-    Maps a normalized heading (e.g., '## executive summary') to its text content.
+    Maps a normalized heading (e.g., 'executive summary') to its text content.
     Level 3 headings and below are kept within their parent section contents.
     """
     sections = {}
@@ -223,11 +238,18 @@ def _get_section_contents(body: str) -> dict[str, str]:
     
     for line in lines:
         s = line.strip()
-        if s.startswith("#") and not s.startswith("###"):
-            if cur_heading:
-                sections[cur_heading] = "\n".join(cur_content).strip()
-            cur_heading = s.lower()
-            cur_content = []
+        # Regex to match markdown headings (e.g. ## **Executive Summary** or **## Executive Summary**)
+        # Capture 1 to 2 hashes at the start (excluding level 3 headings)
+        m = re.match(r'^\s*[\*_]*\s*(#{1,2})\s*[\*_]*(.*)$', s)
+        if m:
+            heading_text = m.group(2).strip()
+            # Clean heading using our global normalization helper
+            cleaned_key = _clean_heading(heading_text)
+            if cleaned_key:
+                if cur_heading:
+                    sections[cur_heading] = "\n".join(cur_content).strip()
+                cur_heading = cleaned_key
+                cur_content = []
         else:
             if cur_heading:
                 cur_content.append(line)
@@ -236,141 +258,56 @@ def _get_section_contents(body: str) -> dict[str, str]:
         sections[cur_heading] = "\n".join(cur_content).strip()
         
     return sections
- 
- 
+
+
 def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                    title: str = None, doc_type: str = None, prompt: str = "",
                    has_files: bool = True) -> list[str]:
     """
-    Validate generated body text and return list of warning strings.
-    Returns empty list if all checks pass.
+    Validate generated body text and return list of warning and info strings.
+    Prepend messages with ERROR:, WARNING:, or INFO:.
     """
     warnings = []
- 
+    
+    # 1. Empty or too short report
     if not body or len(body.strip()) < 200:
-        warnings.append("Validation Warning: Generated body is too short (< 200 chars). Provide more detailed instructions.")
- 
+        warnings.append("ERROR: Generated body is too short (< 200 chars). Provide more detailed instructions.")
+        
+    has_headings_error = False
+    if doc_type not in _OFFICIAL_DOC_TYPES and '##' not in body:
+        warnings.append("ERROR: No section headings (##) found in output. Structure the document with appropriate headers.")
+        has_headings_error = True
+
+    sections_dict = _get_section_contents(body)
+    has_missing_or_short_section = False
+
+    # 2. Mandatory section length and presence checks
     if doc_type and doc_type in _MIN_SECTION_LENGTHS:
-        sections_dict = _get_section_contents(body)
         thresholds = _MIN_SECTION_LENGTHS[doc_type]
         for threshold_heading, min_len in thresholds.items():
-            norm_threshold = threshold_heading.lower().strip()
+            norm_threshold = _clean_heading(threshold_heading)
             found_section_text = None
-            found_heading_name = None
             
             for h_name, content_text in sections_dict.items():
-                if norm_threshold in h_name:
+                if norm_threshold in _clean_heading(h_name):
                     found_section_text = content_text
-                    found_heading_name = h_name
                     break
             
             if found_section_text is not None:
                 actual_len = _calculate_validation_length(found_section_text)
                 if actual_len < min_len:
                     warnings.append(
-                        f"Validation Warning: Section '{threshold_heading}' content is too short ({actual_len} chars < {min_len} minimum). Provide more detailed analysis."
+                        f"ERROR: Section '{threshold_heading}' content is too short ({actual_len} chars < {min_len} minimum). Provide more detailed analysis."
                     )
+                    has_missing_or_short_section = True
             else:
                 warnings.append(
-                    f"Validation Warning: Required section '{threshold_heading}' is missing or has no content."
+                    f"ERROR: Required section '{threshold_heading}' is missing or has no content (missing mandatory section)."
                 )
- 
-    if doc_type not in _OFFICIAL_DOC_TYPES and '##' not in body:
-        warnings.append("Validation Warning: No section headings (##) found in output. Structure the document with appropriate headers.")
- 
-    generic_titles = ["hpcl document", "untitled document", "report", "learning module",
-                      "employee training program", "development program", "kpi dashboard",
-                      "training presentation"]
-    if title and any(gt == title.lower().strip() for gt in generic_titles):
-        warnings.append(f"Validation Warning: Document title '{title}' appears generic.")
- 
-    if doc_type not in _OFFICIAL_DOC_TYPES:
-        placeholders = ['[insert', '[tbd]', '[todo]', '[placeholder]', 'lorem ipsum']
-        for ph in placeholders:
-            if ph in body.lower():
-                warnings.append(f"Validation Warning: Placeholder text '{ph}' found.")
- 
-    if doc_type not in _OFFICIAL_DOC_TYPES and file_data:
-        for fname, data in file_data.items():
-            dname = _display_name(fname).lower()
-            cols = []
-            if data.get('type') == 'multi_sheet':
-                for s in data.get('sheets', {}).values():
-                    cols.extend(s.get('columns', []))
-            else:
-                cols = data.get('columns', [])
-            top_cols = [c.lower() for c in cols[:5]]
-            found = (dname in body.lower() or
-                     any(c in body.lower() for c in top_cols if len(c) > 4))
-            if not found:
-                warnings.append(f"Validation Warning: File '{fname}' is not referenced in the output.")
- 
-    if len(file_data) > 1 and doc_type not in _OFFICIAL_DOC_TYPES:
-        connecting_words = ["compare", "correlation", "contradict", "aligned", "alongside",
-                            "compounded", "across", "versus", "vs", "difference"]
-        if not any(w in body.lower() for w in connecting_words):
-            warnings.append("Validation Warning: No cross-file comparison terms found.")
-        if cross_file_insights:
-            referenced_insights = 0
-            for ins in cross_file_insights:
-                words = re.findall(r'\b\w{4,}\b', ins.title.lower() + " " + ins.detail.lower())
-                stop_words = {"file", "dataset", "report", "connection", "numeric", "variance",
-                              "insight", "priority", "critical", "high", "medium", "low",
-                              "value", "values", "common", "shared", "trends", "trend"}
-                keywords = [w for w in words if w not in stop_words]
-                if keywords:
-                    hits = sum(1 for kw in keywords if kw in body.lower())
-                    if hits >= min(1, len(keywords)):
-                        referenced_insights += 1
-            if referenced_insights == 0:
-                warnings.append("Validation Warning: None of the prioritized cross-file insights were detected in the generated body.")
- 
-    recs_match = re.search(r'##\s*Recommendations\b.*', body, re.IGNORECASE | re.DOTALL)
-    if recs_match:
-        recs_text = recs_match.group()
-        if not any(char.isdigit() for char in recs_text):
-            warnings.append("Validation Warning: Recommendations section lacks numeric data or specific metrics.")
- 
-    if doc_type == "business_report":
-        recs_match = re.search(r'##\s*(?:Strategic\s+)?Recommendations\b.*', body, re.IGNORECASE | re.DOTALL)
-        if recs_match:
-            recs_text = recs_match.group()
-            missing_structure = [
-                term for term in ["Recommendation", "Operational Rationale", "Expected Outcome & Metrics"]
-                if term.lower() not in recs_text.lower()
-            ]
-            if missing_structure:
-                warnings.append(
-                    f"Validation Warning: Strategic recommendations missing structured sections: {missing_structure}."
-                )
- 
+                has_missing_or_short_section = True
+
+    # 3. Official mandatory checks
     if doc_type in _OFFICIAL_DOC_TYPES:
-        if "subject:" not in body.lower() and not any("subject:" in s.lower() for s in body.splitlines()[:15]):
-            warnings.append("Validation Warning: Official document missing required 'Subject:' header.")
- 
-        sig_indicators = ["prepared by", "sd/-", "approved by", "recommended by", "submitted for approval"]
-        if not any(ind in body.lower() for ind in sig_indicators):
-            warnings.append("Validation Warning: No approval authority or signatory block detected.")
- 
-        if doc_type in ["file_note", "office_memorandum", "circular"]:
-            bullet_count = body.count("\n- ") + body.count("\n* ")
-            if bullet_count > 5:
-                warnings.append(
-                    f"Validation Warning: Official doc '{doc_type}' should use numbered paragraphs, not bullet points."
-                )
- 
-        if doc_type == "purchase_note":
-            template_leftovers = [
-                "write 3-5 numbered paragraphs", "explain what exactly",
-                "provide a markdown table", "for unknown values",
-                "write 2-3 numbered paragraphs", "write a clear, formal recommendation"
-            ]
-            found_leftovers = [tl for tl in template_leftovers if tl in body.lower()]
-            if found_leftovers:
-                warnings.append(
-                    f"Validation Warning: Purchase Note contains template instruction text: {found_leftovers}."
-                )
- 
         mandatory_checks = {
             "file_note": [
                 ("## background / facts", "File Note missing 'Background / Facts of the Case' section."),
@@ -418,26 +355,233 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
             ]
         }
         for term, msg in mandatory_checks.get(doc_type, []):
-            if term not in body.lower():
-                warnings.append(f"Validation Warning: {msg}")
- 
-        honorific_match = re.search(
-            r'\b(shri|smt|mr|ms|dr)\.?\s+[a-zA-Z]{2,}\s+[a-zA-Z]{2,}',
-            body, re.IGNORECASE
-        )
-        if honorific_match:
-            warnings.append(
-                f"Validation Warning: Potential invented person name: '{honorific_match.group()}'."
-            )
- 
-        date_patterns = re.findall(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b', body)
-        for dt in date_patterns:
-            if dt not in prompt:
-                in_files = any(dt in str(fdata) for fdata in file_data.values())
-                if not in_files:
-                    warnings.append(f"Validation Warning: Potential invented date: '{dt}'.")
- 
+            is_present = False
+            if term.startswith("##"):
+                norm_term = _clean_heading(term)
+                if any(norm_term in _clean_heading(h) for h in sections_dict.keys()):
+                    is_present = True
+            
+            if not is_present and term in body.lower():
+                is_present = True
+                
+            if not is_present:
+                warnings.append(f"ERROR: {msg} (missing mandatory section)")
+                has_missing_or_short_section = True
+
+    # Generic title check (WARNING)
+    generic_titles = ["hpcl document", "untitled document", "report", "learning module",
+                      "employee training program", "development program", "kpi dashboard",
+                      "training presentation"]
+    if title and any(gt == title.lower().strip() for gt in generic_titles):
+        warnings.append(f"WARNING: Document title '{title}' appears generic.")
+
+    # Placeholder text check (WARNING)
     if doc_type not in _OFFICIAL_DOC_TYPES:
+        placeholders = ['[insert', '[tbd]', '[todo]', '[placeholder]', 'lorem ipsum']
+        for ph in placeholders:
+            if ph in body.lower():
+                warnings.append(f"WARNING: Placeholder text '{ph}' found.")
+
+    # File reference check / Evidence traceability (WARNING)
+    all_files_referenced = True
+    if doc_type not in _OFFICIAL_DOC_TYPES and file_data:
+        for fname, data in file_data.items():
+            dname = _display_name(fname).lower()
+            cols = []
+            if data.get('type') == 'multi_sheet':
+                for s in data.get('sheets', {}).values():
+                    cols.extend(s.get('columns', []))
+            else:
+                cols = data.get('columns', [])
+            top_cols = [c.lower() for c in cols[:10]]
+            
+            # Extract significant words from filename (minimum 3 chars, skip generic terms)
+            fname_words = [
+                w for w in re.findall(r'\b\w{3,}\b', dname)
+                if w not in {'data', 'file', 'report', 'sheet', 'xlsx', 'csv', 'txt', 'pdf', 'docx', 'comparison'}
+            ]
+            
+            # Extract unique entity sample values to check for semantic containment
+            entity_vals = []
+            if data and 'entities' in data:
+                for ent_name, ent_info in data['entities'].items():
+                    vals = ent_info.get('sample_values', [])
+                    for val in vals:
+                        val_str = str(val).strip().lower()
+                        if len(val_str) > 2 and val_str not in {'nan', 'null', 'none'}:
+                            entity_vals.append(val_str)
+                            
+            found = (
+                dname in body.lower() or
+                (len(fname_words) > 0 and any(w in body.lower() for w in fname_words)) or
+                any(c in body.lower() for c in top_cols if len(c) > 3) or
+                any(val in body.lower() for val in entity_vals[:15])
+            )
+            if not found:
+                warnings.append(f"WARNING: File '{fname}' is not referenced in the output (missing evidence).")
+                all_files_referenced = False
+
+    # Cross-file comparison / reasoning (WARNING)
+    has_cross_file_insight_match = False
+    if file_data and len(file_data) > 1 and doc_type not in _OFFICIAL_DOC_TYPES:
+        connecting_words = [
+            "compare", "correlation", "contradict", "aligned", "alongside",
+            "compounded", "across", "versus", "vs", "difference", "variance",
+            "higher", "lower", "relative", "comparison", "relationship",
+            "cross-file", "overlap", "combined", "synthetic", "correlated"
+        ]
+        if not any(w in body.lower() for w in connecting_words):
+            warnings.append("WARNING: No cross-file comparison terms found (cross-file synthesis missing).")
+        
+        if cross_file_insights:
+            referenced_insights = 0
+            for ins in cross_file_insights:
+                # 1. Check ID-based match (e.g. INS-001)
+                ins_id = getattr(ins, 'id', None)
+                if ins_id and ins_id.lower() in body.lower():
+                    referenced_insights += 1
+                    continue
+                
+                # 2. Or fallback to matching key words from title and detail
+                title_text = getattr(ins, 'title', '')
+                detail_text = getattr(ins, 'detail', '')
+                words = re.findall(r'\b\w{4,}\b', title_text.lower() + " " + detail_text.lower())
+                stop_words = {"file", "dataset", "report", "connection", "numeric", "variance",
+                              "insight", "priority", "critical", "high", "medium", "low",
+                              "value", "values", "common", "shared", "trends", "trend"}
+                keywords = [w for w in words if w not in stop_words]
+                if keywords:
+                    hits = sum(1 for kw in keywords if kw in body.lower())
+                    if hits >= min(1, len(keywords)):
+                        referenced_insights += 1
+                        
+            if referenced_insights == 0:
+                warnings.append("WARNING: None of the prioritized cross-file insights were detected in the generated body (confidence not referenced).")
+            else:
+                has_cross_file_insight_match = True
+
+    # Recommendations checks (WARNING)
+    recs_match = re.search(r'##\s*(?:Strategic\s+)?Recommendations\b.*', body, re.IGNORECASE | re.DOTALL)
+    if recs_match:
+        recs_text = recs_match.group()
+        if not any(char.isdigit() for char in recs_text):
+            warnings.append("WARNING: Recommendations section lacks numeric data or specific metrics (weak recommendation).")
+
+    # Table header checks for business report (WARNING)
+    if doc_type == "business_report" and recs_match:
+        recs_text = recs_match.group()
+        recs_text_lower = recs_text.lower()
+        has_rec = any(k in recs_text_lower for k in ["recommendation", "action", "measure"])
+        has_rat = any(k in recs_text_lower for k in ["rationale", "justification", "why"])
+        has_out = any(k in recs_text_lower for k in ["outcome", "metric", "kpi", "result"])
+        
+        missing_structure = []
+        if not has_rec:
+            missing_structure.append("Recommendation")
+        if not has_rat:
+            missing_structure.append("Operational Rationale")
+        if not has_out:
+            missing_structure.append("Expected Outcome & Metrics")
+            
+        if missing_structure:
+            warnings.append(
+                f"WARNING: Strategic recommendations missing structured sections: {missing_structure}."
+            )
+
+    # Official document specifics
+    if doc_type in _OFFICIAL_DOC_TYPES:
+        if "subject:" not in body.lower() and not any("subject:" in s.lower() for s in body.splitlines()[:15]):
+            warnings.append("ERROR: Official document missing required 'Subject:' header.")
+            has_missing_or_short_section = True
+ 
+        sig_indicators = [
+            "prepared by", "sd/-", "approved by", "recommended by", "submitted for approval",
+            "by order", "by order of", "signature", "designation", "department", "authority", "signatory"
+        ]
+        if not any(ind in body.lower() for ind in sig_indicators):
+            warnings.append("ERROR: No approval authority or signatory block detected (missing signatory).")
+            has_missing_or_short_section = True
+ 
+        if doc_type in ["file_note", "office_memorandum", "circular"]:
+            bullet_count = body.count("\n- ") + body.count("\n* ")
+            if bullet_count > 5:
+                warnings.append(
+                    f"WARNING: Official doc '{doc_type}' should use numbered paragraphs, not bullet points."
+                )
+ 
+        if doc_type == "purchase_note":
+            template_leftovers = [
+                "write 3-5 numbered paragraphs", "explain what exactly",
+                "provide a markdown table", "for unknown values",
+                "write 2-3 numbered paragraphs", "write a clear, formal recommendation"
+            ]
+            found_leftovers = [tl for tl in template_leftovers if tl in body.lower()]
+            if found_leftovers:
+                warnings.append(
+                    f"WARNING: Purchase Note contains template instruction text: {found_leftovers}."
+                )
+
+    # Invented names check (WARNING)
+    honorific_match = re.search(
+        r'\b(shri|smt|mr|ms|dr)\.?\s+[a-zA-Z]{2,}\s+[a-zA-Z]{2,}',
+        body, re.IGNORECASE
+    )
+    if honorific_match:
+        warnings.append(
+            f"WARNING: Potential invented person name: '{honorific_match.group()}'."
+        )
+
+    # Dynamic date check (WARNING)
+    import datetime
+    today = datetime.date.today()
+    allowed_dates = set()
+    for fmt in [
+        "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y",
+        "%d.%m.%Y", "%Y.%m.%d", "%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y"
+    ]:
+        s_date = today.strftime(fmt).lower()
+        allowed_dates.add(s_date)
+        parts = re.split(r'([/\-\.\s,]+)', s_date)
+        clean_parts = []
+        for p in parts:
+            if p.isdigit():
+                clean_parts.append(str(int(p)))
+            else:
+                clean_parts.append(p)
+        allowed_dates.add("".join(clean_parts))
+
+    date_patterns = re.findall(r'\b\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4}\b', body)
+    for dt in date_patterns:
+        dt_clean = dt.strip().lower()
+        if dt_clean in allowed_dates:
+            continue
+        is_today = False
+        for sep in ['/', '-', '.']:
+            if sep in dt_clean:
+                parts = dt_clean.split(sep)
+                if len(parts) == 3:
+                    try:
+                        p0, p1, p2 = int(parts[0]), int(parts[1]), int(parts[2])
+                        if (p0 == today.day and p1 == today.month and p2 == today.year) or \
+                           (p0 == today.month and p1 == today.day and p2 == today.year) or \
+                           (p0 == today.year and p1 == today.month and p2 == today.day) or \
+                           (p0 == today.year and p1 == today.day and p2 == today.month):
+                            is_today = True
+                            break
+                    except ValueError:
+                        pass
+        if is_today:
+            continue
+            
+        if dt not in prompt:
+            in_files = False
+            if file_data:
+                in_files = any(dt in str(fdata) for fdata in file_data.values())
+            if not in_files:
+                warnings.append(f"WARNING: Potential invented date: '{dt}'.")
+
+    # Trend contradictions (WARNING)
+    if doc_type not in _OFFICIAL_DOC_TYPES and file_data:
         for fname, data in file_data.items():
             trends = data.get("trends", {})
             if data.get("type") == "multi_sheet":
@@ -466,7 +610,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                                 pos in window for pos in ["increase", "grow", "rose", "rising", "climb", "upward"]
                             ):
                                 warnings.append(
-                                    f"Validation Warning: Trend contradiction for '{col}' in '{fname}'. "
+                                    f"WARNING: Trend contradiction for '{col}' in '{fname}'. "
                                     f"Data=UP but body has negative language."
                                 )
                         elif direction == "down":
@@ -475,11 +619,12 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                                 neg in window for neg in ["decrease", "decline", "drop", "fell", "downward", "shrank", "reduced"]
                             ):
                                 warnings.append(
-                                    f"Validation Warning: Trend contradiction for '{col}' in '{fname}'. "
+                                    f"WARNING: Trend contradiction for '{col}' in '{fname}'. "
                                     f"Data=DOWN but body has positive language."
                                 )
                         idx += len(clean_col)
- 
+
+    # Invented metrics validation (WARNING)
     if not has_files and doc_type in (
         "business_report", "sop", "policy_document", "financial_report",
         "circular", "office_memorandum", "file_note", "purchase_note", "office_order"
@@ -496,11 +641,23 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                 found_metrics.append(f"'{m}' ({label})")
         if found_metrics:
             warnings.append(
-                f"Validation Warning: Potential invented metrics in no-file generation: {', '.join(found_metrics)}."
+                f"WARNING: Potential invented metrics in no-file generation: {', '.join(found_metrics)}."
             )
- 
+
+    # Positive INFO milestones (Non-flooding, meaningful milestones only)
+    if not has_headings_error and not has_missing_or_short_section:
+        warnings.append("INFO: All mandatory sections present.")
+    if has_cross_file_insight_match:
+        warnings.append("INFO: Cross-file reasoning verified.")
+    if file_data and all_files_referenced:
+        warnings.append("INFO: Evidence traceability verified.")
+        
+    # Append final milestone if completely clean of any errors or warnings
+    has_errors_or_warnings = any(w.startswith("ERROR:") or w.startswith("WARNING:") for w in warnings)
+    if not has_errors_or_warnings:
+        warnings.append("INFO: Validator completed successfully.")
+
     return warnings
- 
  
 # ==============================================================================
 # DIGEST VALIDATION
