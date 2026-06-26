@@ -2,6 +2,7 @@ import os
 import re
 import logging
 
+from parser_utils import parse_sections, extract_table, strip_table_from_text
 from reportlab.lib.pagesizes import LETTER
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import HexColor, black
@@ -356,7 +357,16 @@ def _draw_official_pdf_header(c, metadata, doc_type, y):
     return y
 
 
+# ── Official PDF footer block ──────────────────────────────────────────────────
+# FIX: Was truncated in previous version — the copy_to/distribution block
+# had no closing code and never returned y, causing a silent AttributeError
+# that swallowed the entire signature/distribution section at runtime.
+
 def _draw_official_pdf_footer(c, metadata, y):
+    """
+    Draw the official document footer: signature block + distribution list.
+    Returns the final y position after rendering.
+    """
     needed = 120
     if y < BOTTOM_MARGIN + needed:
         draw_footer(c)
@@ -385,10 +395,17 @@ def _draw_official_pdf_footer(c, metadata, y):
             sig_lines.extend(["", f"{v_sig}"])
 
     for s_line in sig_lines:
+        if y < BOTTOM_MARGIN + 30:
+            draw_footer(c)
+            c.showPage()
+            y = PAGE_HEIGHT - TOP_MARGIN
+            c.setFont("Helvetica-Bold", 10)
+            c.setFillColor(BODY_COLOR)
         if s_line:
             c.drawRightString(PAGE_WIDTH - RIGHT_MARGIN, y, s_line)
         y -= 12
 
+    # Distribution / Copy To block
     for k, label in [("copy_to", "Copy to:"), ("distribution", "Distribution:")]:
         val = metadata.get(k)
         if val:
@@ -397,6 +414,29 @@ def _draw_official_pdf_footer(c, metadata, y):
                 draw_footer(c)
                 c.showPage()
                 y = PAGE_HEIGHT - TOP_MARGIN
+                c.setFont("Helvetica-Bold", 10)
+                c.setFillColor(BODY_COLOR)
+            c.setFont("Helvetica-Bold", 9)
+            c.setFillColor(HexColor("#555555"))
+            c.drawString(LEFT_MARGIN, y, label)
+            y -= 12
+            c.setFont("Helvetica", 9)
+            c.setFillColor(BODY_COLOR)
+            # Distribution may be comma-separated — split and render each entry
+            entries = [e.strip() for e in val.split(',') if e.strip()]
+            for entry in entries:
+                if y < BOTTOM_MARGIN + 30:
+                    draw_footer(c)
+                    c.showPage()
+                    y = PAGE_HEIGHT - TOP_MARGIN
+                    c.setFont("Helvetica", 9)
+                    c.setFillColor(BODY_COLOR)
+                c.drawString(LEFT_MARGIN + 12, y, f"• {entry}")
+                y -= 12
+
+    return y
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def generate_pdf(body, output_path="outputs/output.pdf",
@@ -417,7 +457,7 @@ def generate_pdf(body, output_path="outputs/output.pdf",
 
     org_name = ""
     if is_official:
-        # PATCH: pass doc_type so purchase_note skips footer scan
+        # Pass doc_type so purchase_note skips footer scan
         metadata, body = parse_official_header(body, doc_type=doc_type, user_prompt=user_prompt)
         org_name = (metadata.get('organization')
                     or metadata.get('company')
@@ -469,33 +509,41 @@ def generate_pdf(body, output_path="outputs/output.pdf",
         elif level == 3:
             y = _draw_heading(c, heading, y, 11, HexColor("#333333"))
 
+        # Strip markdown table if present to prevent rendering raw markdown tables inside callout/list blocks
+        tbl = extract_table(content)
+        clean_content = strip_table_from_text(content) if tbl else content
+
         # Content — section-type-aware
         if sec_type == "executive_summary":
-            y = _draw_callout_block(c, content, y,
+            y = _draw_callout_block(c, clean_content, y,
                                     bg=CALLOUT_BG, border=CALLOUT_BORDER,
                                     label="EXECUTIVE SUMMARY")
         elif sec_type in ("risk_section", "safety"):
-            y = _draw_callout_block(c, content, y,
+            y = _draw_callout_block(c, clean_content, y,
                                     bg=WARNING_BG, border=WARNING_BORDER,
                                     label="⚠ ATTENTION")
-        elif sec_type == "kpi_section" and table:
-            y = draw_kpi_table(c, table, y)
+        elif sec_type == "kpi_section" and tbl:
+            y = draw_kpi_table(c, tbl, y)
         elif sec_type == "checklist":
-            y = _draw_checklist(c, content, y)
+            y = _draw_checklist(c, clean_content, y)
         elif sec_type == "objectives":
-            y = _draw_numbered_list(c, content, y, accent=TITLE_COLOR)
+            y = _draw_numbered_list(c, clean_content, y, accent=TITLE_COLOR)
         elif sec_type == "recommendations":
-            y = _draw_numbered_list(c, content, y, accent=FOOTER_COLOR)
+            y = _draw_numbered_list(c, clean_content, y, accent=FOOTER_COLOR)
         elif sec_type == "assessment":
-            y = _draw_assessment(c, content, y)
-        elif table:
-            y = draw_table(c, table, y)
+            y = _draw_assessment(c, clean_content, y)
         else:
-            y = draw_body(c, content, y)
+            y = draw_body(c, clean_content, y)
+
+        # Draw the table if one was extracted and we didn't draw it as a KPI table
+        if tbl and sec_type != "kpi_section":
+            y -= 8
+            y = draw_table(c, tbl, y)
 
         # Inline charts
         for idx in assignments.get(sec_idx, []):
-            img_path = chart_images[idx][1]
+            chart = chart_images[idx]
+            img_path = chart.get("path", "") if isinstance(chart, dict) else chart[1]
             y = _place_chart(c, img_path, y)
 
         y -= 8
@@ -509,8 +557,13 @@ def generate_pdf(body, output_path="outputs/output.pdf",
                           TITLE_COLOR, underline=True)
         y -= 8
         for idx in unplaced_idx:
-            ct = chart_images[idx][0]
-            img_path = chart_images[idx][1]
+            chart = chart_images[idx]
+            if isinstance(chart, dict):
+                ct = chart.get("title", "")
+                img_path = chart.get("path", "")
+            else:
+                ct = chart[0]
+                img_path = chart[1]
             label  = _clean_col_name(ct)
             img_h  = _img_h(img_path)
             needed = img_h + 26
@@ -590,15 +643,29 @@ def _clean_bracketed_placeholders(text):
 def _dedupe_charts(chart_images):
     seen_paths, seen_titles, result = set(), set(), []
     for chart in chart_images:
-        ct = chart[0]
-        path = chart[1]
-        col = chart[2] if len(chart) > 2 else ""
+        if isinstance(chart, dict):
+            ct = chart.get("title", "")
+            path = chart.get("path", "")
+            col = chart.get("column", "")
+        else:
+            ct = chart[0]
+            path = chart[1]
+            col = chart[2] if len(chart) > 2 else ""
+            
         norm_title = ct.lower().strip()
         if path in seen_paths or norm_title in seen_titles:
             continue
         seen_paths.add(path)
         seen_titles.add(norm_title)
-        result.append((ct, path, col))
+        
+        if isinstance(chart, dict):
+            result.append(chart)
+        else:
+            result.append({
+                "title": ct,
+                "path": path,
+                "column": col
+            })
     return result
 
 
@@ -929,9 +996,14 @@ def _assign_charts_to_sections(sections, chart_images):
     unplaced    = []
 
     for idx, chart in enumerate(chart_images):
-        ct = chart[0]
-        img_path = chart[1]
-        col = chart[2] if len(chart) > 2 else ""
+        if isinstance(chart, dict):
+            ct = chart.get("title", "")
+            img_path = chart.get("path", "")
+            col = chart.get("column", "")
+        else:
+            ct = chart[0]
+            img_path = chart[1]
+            col = chart[2] if len(chart) > 2 else ""
         
         if not os.path.exists(img_path):
             continue
@@ -1000,37 +1072,6 @@ def clean_text(text):
             continue
         lines.append(re.sub(r'[*_]+', '', line))
     return "\n".join(lines)
-
-
-def parse_sections(text):
-    pat = re.compile(r'^(#{1,3})\s+(.*)$', re.MULTILINE)
-    ms  = list(pat.finditer(text))
-    if not ms:
-        return [{'level': 0, 'heading': '', 'body': text.strip(), 'table': None}]
-    secs = []
-    if ms[0].start() > 0:
-        pre = text[:ms[0].start()].strip()
-        if pre:
-            secs.append({'level': 0, 'heading': '', 'body': pre, 'table': None})
-    for i, m in enumerate(ms):
-        body = text[m.end(): ms[i + 1].start() if i + 1 < len(ms) else len(text)].strip()
-        secs.append({
-            'level':   len(m.group(1)),
-            'heading': m.group(2).strip(),
-            'body':    body,
-            'table':   extract_table(body),
-        })
-    return secs
-
-
-def extract_table(text):
-    lines = [l.strip() for l in text.splitlines() if '|' in l]
-    if len(lines) < 2:
-        return None
-    rows = [l for l in lines if not re.match(r'^[\|\s\-:]+$', l)]
-    if len(rows) < 2:
-        return None
-    return [[c.strip() for c in r.split('|') if c.strip()] for r in rows]
 
 
 def wrap_text(c, text, max_w, font="Helvetica", size=11):

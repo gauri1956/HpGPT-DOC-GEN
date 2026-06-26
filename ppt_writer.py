@@ -92,7 +92,13 @@ def generate_ppt(content, output_path="outputs/output.pptx",
         sec_kw   = _kw(sec_text)
  
         best_ci, best_score = None, 0
-        for ci, (ct, img_path) in enumerate(chart_images):
+        for ci, chart in enumerate(chart_images):
+            if isinstance(chart, dict):
+                ct = chart.get("title", "")
+                img_path = chart.get("path", "")
+            else:
+                ct, img_path = chart[0], chart[1]
+                
             if ci in placed or not os.path.exists(img_path):
                 continue
             ckw = _kw(_clean(ct))
@@ -120,22 +126,33 @@ def generate_ppt(content, output_path="outputs/output.pptx",
             _add_kpi_dashboard_slide(sl, bullets)
         elif best_ci is not None and best_score > 0:
             _add_bullets_left(sl, bullets)
-            _add_chart_right(sl, chart_images[best_ci][1])
+            best_chart = chart_images[best_ci]
+            best_path = best_chart.get("path", "") if isinstance(best_chart, dict) else best_chart[1]
+            _add_chart_right(sl, best_path)
             placed.add(best_ci)
         else:
             _add_bullets_full(sl, bullets)
  
     # 3. Remaining chart slides
-    unplaced = [(ct, p) for ci, (ct, p) in enumerate(chart_images)
-                if ci not in placed and os.path.exists(p)]
+    unplaced = []
+    for ci, chart in enumerate(chart_images):
+        if ci in placed:
+            continue
+        if isinstance(chart, dict):
+            ct = chart.get("title", "")
+            img_path = chart.get("path", "")
+        else:
+            ct, img_path = chart[0], chart[1]
+        if os.path.exists(img_path):
+            unplaced.append((ct, img_path))
  
     pairs = _pair_charts(unplaced)[:MAX_CHART_SLIDES]
     for pair in pairs:
         sl = _blank(prs)
         _footer(sl, filename_title)
  
-        if len(pair) == 2:
-            ct, img_path = pair
+        if len(pair) == 1:
+            ct, img_path = pair[0]
             _title_bar(sl, _clean(ct))
             _add_chart_full(sl, img_path)
         else:

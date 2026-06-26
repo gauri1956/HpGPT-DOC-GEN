@@ -6,13 +6,13 @@ import logging
 from collections import Counter
  
 from data_agent        import extract_data, detect_content_intent
-from analysis_agent    import run_analysis, run_insight
+from analysis_agent    import run_analysis, run_insight, _validate_digest as _validate_digest_facts, _strip_digest_tags
 from graph_agent       import generate_charts_from_data, generate_charts_from_markers, dedup_charts
 from doc_writer        import generate_docx
 from pdf_writer        import generate_pdf
 from ppt_writer        import generate_ppt
 from data_fusion_agent import DataFusionAgent
-from planner_agent     import plan_tasks   # ← NEW: import updated planner
+from planner_agent     import plan_tasks
  
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ _HIGH_PRIORITY_DOC_TYPES = {
     "circular", "purchase_note", "office_order",
     "business_report", "financial_report", "sop"
 }
-
+ 
 _MIN_SECTION_LENGTHS = {
     "business_report": {"## Executive Summary": 150, "## Key Findings": 300},
     "purchase_note":   {"## 1. Purpose": 200, "## 3. Operational": 200},
@@ -187,10 +187,34 @@ def _display_name(name):
                 .replace('.docx', '').replace('.txt', '').replace('_', ' ').strip())
  
  
+def _calculate_validation_length(text: str) -> int:
+    """
+    Calculate the length of the text for validation, excluding:
+    - Tables (lines containing '|')
+    - Embedded charts (e.g. [CHART: ...])
+    - Callout block delimiters ('>')
+    """
+    if not text:
+        return 0
+    cleaned_lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        if '|' in s:
+            continue
+        if s.startswith('>'):
+            s = s[1:].strip()
+        s = re.sub(r'\[CHART:[^\]]*\]', '', s)
+        cleaned_lines.append(s)
+    
+    cleaned_text = "\n".join(cleaned_lines).strip()
+    return len(cleaned_text)
+ 
+ 
 def _get_section_contents(body: str) -> dict[str, str]:
     """
     Parse a markdown body and extract content for each heading.
     Maps a normalized heading (e.g., '## executive summary') to its text content.
+    Level 3 headings and below are kept within their parent section contents.
     """
     sections = {}
     lines = body.splitlines()
@@ -199,7 +223,7 @@ def _get_section_contents(body: str) -> dict[str, str]:
     
     for line in lines:
         s = line.strip()
-        if s.startswith("#"):
+        if s.startswith("#") and not s.startswith("###"):
             if cur_heading:
                 sections[cur_heading] = "\n".join(cur_content).strip()
             cur_heading = s.lower()
@@ -212,8 +236,8 @@ def _get_section_contents(body: str) -> dict[str, str]:
         sections[cur_heading] = "\n".join(cur_content).strip()
         
     return sections
-
-
+ 
+ 
 def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                    title: str = None, doc_type: str = None, prompt: str = "",
                    has_files: bool = True) -> list[str]:
@@ -225,7 +249,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
  
     if not body or len(body.strip()) < 200:
         warnings.append("Validation Warning: Generated body is too short (< 200 chars). Provide more detailed instructions.")
-
+ 
     if doc_type and doc_type in _MIN_SECTION_LENGTHS:
         sections_dict = _get_section_contents(body)
         thresholds = _MIN_SECTION_LENGTHS[doc_type]
@@ -241,7 +265,7 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
                     break
             
             if found_section_text is not None:
-                actual_len = len(found_section_text)
+                actual_len = _calculate_validation_length(found_section_text)
                 if actual_len < min_len:
                     warnings.append(
                         f"Validation Warning: Section '{threshold_heading}' content is too short ({actual_len} chars < {min_len} minimum). Provide more detailed analysis."
@@ -479,49 +503,30 @@ def _validate_body(body: str, file_data: dict, cross_file_insights: list = None,
  
  
 # ==============================================================================
-# INSIGHT VALIDATION  ← NEW
+# DIGEST VALIDATION
 # Lightweight inline check: does each digest bullet have a data reference?
+# NOTE: This is an alias/wrapper. The core logic lives in analysis_agent.py
+# as _validate_digest_facts (imported above) so it can also be used
+# independently. The orchestrator calls _validate_digest() here.
 # ==============================================================================
  
 def _validate_digest(digest_text: str, file_name: str) -> list[str]:
     """
-    Check each bullet in a digest for unsupported claims.
-    A bullet is flagged if it makes a numeric claim but has no
-    supporting_data_ref marker AND no parenthetical source hint.
+    Check each bullet in a digest for unsupported numeric claims.
+    Delegates to analysis_agent._validate_digest_facts which checks for
+    [src:] tags and known domain keywords as fallback markers.
  
-    This is the lightweight version of structured output validation —
-    no extra LLM call, purely pattern-based.
- 
-    Returns list of warning strings (empty = all good).
+    Called on the RAW tagged digest (before stripping) so [src:] presence
+    is visible. Returns list of warning strings (empty = all good).
     """
-    warnings = []
-    lines = [l.strip() for l in digest_text.splitlines() if l.strip().startswith("- ")]
- 
-    for line in lines:
-        has_number = bool(re.search(r'\b\d+[\.,]?\d*\b', line))
-        # A data ref is present if line contains parenthetical source hint
-        # e.g. "(Sheet2)", "(Row 14)", "(Q3)", "(col: Sales KL)"
-        has_ref = bool(re.search(
-            r'\((?:sheet|row|col|table|data|file|period|Q\d|FY\d|avg|sum|total)',
-            line, re.IGNORECASE
-        ))
-        # Also accept explicit field name references (>4 chars) matching known patterns
-        has_field_ref = bool(re.search(
-            r'\b(?:total|average|avg|mean|sum|max|min|rate|ratio|count|kl|mt|inr|lakh)\b',
-            line, re.IGNORECASE
-        ))
- 
-        if has_number and not has_ref and not has_field_ref:
-            warnings.append(
-                f"[DigestCheck] Unsupported numeric claim in {file_name}: {line[:120]}"
-            )
- 
-    return warnings
+    return _validate_digest_facts(digest_text, file_name)
  
  
 # ==============================================================================
-# SELF-CORRECTION  ← NEW
+# SELF-CORRECTION
 # One retry pass when severe validation issues are detected.
+# After correction, re-extracts charts from the corrected body for non-official
+# doc types so ordered_charts stays consistent.
 # ==============================================================================
  
 def _self_correct_body(
@@ -533,14 +538,24 @@ def _self_correct_body(
     official_format_spec: str | None,
     digest_results: list,
     cross_file_context: str,
-) -> str:
+    cross_file_insights: list = None,
+    file_data: dict = None,
+    entity_map: dict = None,
+    links: list = None,
+    ranked_files: list = None,
+) -> tuple[str, list]:
     """
     Attempt one self-correction LLM call when severe structural warnings
     are found in the generated body (missing mandatory sections, template
     leftovers in purchase notes, or zero cross-file connections).
  
     Only fires for severe warnings — not for minor style notes.
-    Returns corrected body, or original body if correction fails.
+ 
+    Returns:
+        (corrected_body, new_charts)
+        corrected_body: corrected text (or original if correction failed/unneeded)
+        new_charts:     charts extracted from corrected body for non-official docs
+                        (empty list for official docs or if no correction occurred)
     """
     from llm_agent import query_llama
  
@@ -555,7 +570,7 @@ def _self_correct_body(
  
     severe = [w for w in warnings if any(p in w for p in SEVERE_PATTERNS)]
     if not severe:
-        return body  # nothing severe — skip retry
+        return body, []   # nothing severe — skip retry
  
     logger.warning(
         f"[Orchestrator] Self-correction triggered: {len(severe)} severe warning(s). "
@@ -580,12 +595,31 @@ def _self_correct_body(
             doc_type=doc_type,
             cross_file_context=cross_file_context,
             official_format_spec=official_format_spec,
+            cross_file_insights=cross_file_insights,
+            file_data=file_data,
+            entity_map=entity_map,
+            links=links,
+            ranked_files=ranked_files,
         )
         logger.info("[Orchestrator] Self-correction LLM call completed.")
-        return corrected_raw
+ 
+        # Re-extract charts from corrected body for non-official docs.
+        # This keeps ordered_charts consistent with the corrected text.
+        new_charts = []
+        if doc_type not in _OFFICIAL_DOC_TYPES:
+            corrected_body, new_charts = generate_charts_from_markers(corrected_raw)
+            logger.info(
+                f"[Orchestrator] Self-correction: extracted {len(new_charts)} "
+                f"chart marker(s) from corrected body."
+            )
+        else:
+            corrected_body = corrected_raw
+ 
+        return corrected_body, new_charts
+ 
     except Exception as e:
         logger.warning(f"[Orchestrator] Self-correction failed: {e}. Using original body.")
-        return body
+        return body, []
  
  
 def run_agent_from_api(prompt, file_paths=None, file_path=None,
@@ -694,10 +728,7 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
     logger.info(f"Dominant intent: {dominant_intent}")
  
     # ==========================================================================
-    # STEP 1c -- FIX: Use planner to lock doc_type when not set from prompt
-    # Previously this was a simple dict lookup. Now we use plan_tasks() so the
-    # planner's intent-routing logic, official-doc detection, and output format
-    # resolution all happen in one place and feed back into the orchestrator.
+    # STEP 1c -- Use planner to lock doc_type when not set from prompt
     # ==========================================================================
     if doc_type is None and file_data:
         intent_list = list(file_intents.values())
@@ -706,13 +737,11 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
             file_names   = list(file_data.keys()),
             file_intents = intent_list,
         )
-        # Only accept doc_type from planner if it resolved something non-trivial
         planner_doc_type = plan.get("doc_type")
         if planner_doc_type and planner_doc_type != "informational":
             doc_type = planner_doc_type
             logger.info(f"[Orchestrator] doc_type locked by planner: {doc_type}")
         else:
-            # Fallback: simple intent map (keeps old behaviour for informational files)
             _intent_to_dtype = {
                 "analytical":    "business_report",
                 "operational":   "operational",
@@ -725,7 +754,6 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                 logger.info(f"[Orchestrator] doc_type inferred from intent: {doc_type}")
  
     elif doc_type is None and not file_data:
-        # No files, no prompt signal — default
         doc_type = None
  
     # ==========================================================================
@@ -734,6 +762,9 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
     cross_file_context  = ""
     ranked_file_names: list[str] = list(file_data.keys())
     cross_file_insights = []
+    entity_map = None
+    links = None
+    ranked_files = None
  
     if has_files and file_data:
         logger.info("[Orchestrator] Running DataFusionAgent ...")
@@ -741,6 +772,9 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
             fusion_agent  = DataFusionAgent(file_data, user_prompt=prompt)
             fusion_result = fusion_agent.run()
             cross_file_insights = fusion_result.insights
+            entity_map = fusion_result.entity_map
+            links = fusion_result.links
+            ranked_files = fusion_result.ranked_files
  
             cross_file_context = fusion_result.cross_file_context
             logger.info(f"[Orchestrator] Fusion summary: {fusion_result.summary_log}")
@@ -824,7 +858,6 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
         else:
             body = raw_body
  
-        # FIX: pass has_files=False so no-file hallucination checks run correctly
         validation_warnings = _validate_body(
             body, file_data, [], title=title,
             doc_type=doc_type, prompt=prompt, has_files=False
@@ -880,11 +913,12 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                 logger.info(f"Loaded session cache from {cache_path}")
             except Exception as e:
                 logger.warning(f"Failed to read cache file {cache_path}: {e}")
-
+ 
         for name in ranked_file_names:
             if name in cache_data["digests"]:
                 logger.info(f"Using cached digest for {name}")
                 cached_entry = cache_data["digests"][name]
+                # Cached digests are already stripped (tags removed before caching below)
                 clean_digest = cached_entry["digest_text"]
                 detected_intent = cached_entry["detected_intent"]
                 cached_charts = cached_entry.get("charts", [])
@@ -894,16 +928,24 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                 if doc_type not in _OFFICIAL_DOC_TYPES:
                     processed_charts = []
                     for item in cached_charts:
-                        title_c = item[0]
-                        path_c = item[1]
-                        sig_c = item[2]
-                        col_c = item[3] if len(item) > 3 else ""
-                        processed_charts.append((title_c, path_c, tuple(sig_c) if sig_c else None, col_c))
+                        if isinstance(item, dict):
+                            processed_charts.append(item)
+                        else:
+                            title_c = item[0]
+                            path_c = item[1]
+                            sig_c = item[2]
+                            col_c = item[3] if len(item) > 3 else ""
+                            processed_charts.append({
+                                "title": title_c,
+                                "path": path_c,
+                                "signature": sig_c,
+                                "column": col_c
+                            })
                     
                     deduped, seen_signatures = dedup_charts(processed_charts, seen_signatures)
                     ordered_charts.extend(deduped)
                 continue
-
+ 
             data         = file_data[name]
             dtype        = data.get('type', 'unknown')
             intent       = file_intents.get(name, "analytical")
@@ -923,7 +965,7 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                 flat = _flatten_multisheet(data)
                 flat["dataset_role"] = dataset_role
                 flat["causal_hints"] = causal_hints
-                digest_text, detected_intent = run_analysis(
+                tagged_digest_text, detected_intent = run_analysis(
                     flat,
                     instruction=f"{prompt} — analysing {_display_name(name)}",
                     intent=intent,
@@ -932,7 +974,7 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                     prior_digests_summary=prior_digests_summary
                 )
             else:
-                digest_text, detected_intent = run_analysis(
+                tagged_digest_text, detected_intent = run_analysis(
                     data,
                     instruction=f"{prompt} — analysing {_display_name(name)}",
                     intent=intent,
@@ -941,13 +983,18 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                     prior_digests_summary=prior_digests_summary
                 )
  
-            # FIX: digest validation — flag unsupported numeric claims
-            digest_warnings = _validate_digest(digest_text, name)
+            # FIX: Validate on the RAW tagged digest (tags visible for [src:] checks),
+            # then strip tags before caching and passing to run_insight().
+            # This is the correct separation: validate -> strip -> cache/use.
+            digest_warnings = _validate_digest(tagged_digest_text, name)
             if digest_warnings:
                 for dw in digest_warnings:
                     logger.warning(dw)
                     if isinstance(warnings_out, list):
                         warnings_out.append(dw)
+ 
+            # Strip [src:]/[conf:] tags AFTER validation — clean digest for LLM use
+            digest_text = _strip_digest_tags(tagged_digest_text)
  
             if doc_type not in _OFFICIAL_DOC_TYPES:
                 clean_digest, marker_charts = generate_charts_from_markers(digest_text)
@@ -965,24 +1012,41 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                     f"markers={len(marker_charts)})"
                 )
                 digest_results.append((clean_digest, detected_intent))
-
+ 
                 serializable_charts = []
-                for title_c, path_c, sig_c, col_c in file_charts:
-                    serializable_charts.append([title_c, path_c, list(sig_c) if sig_c else None, col_c])
+                for chart in file_charts:
+                    if isinstance(chart, dict):
+                        sig = chart.get("signature")
+                        serializable_charts.append({
+                            "title": chart.get("title", ""),
+                            "path": chart.get("path", ""),
+                            "signature": list(sig) if sig else None,
+                            "column": chart.get("column", "")
+                        })
+                    else:
+                        title_c, path_c, sig_c, col_c = chart[0], chart[1], chart[2], chart[3] if len(chart) > 3 else ""
+                        serializable_charts.append({
+                            "title": title_c,
+                            "path": path_c,
+                            "signature": list(sig_c) if sig_c else None,
+                            "column": col_c
+                        })
                 
+                # Cache the STRIPPED digest (no [src:]/[conf:] tags)
                 cache_data["digests"][name] = {
                     "digest_text": clean_digest,
                     "detected_intent": detected_intent,
                     "charts": serializable_charts
                 }
             else:
+                # For official docs, no chart extraction needed — cache stripped digest
                 digest_results.append((digest_text, detected_intent))
                 cache_data["digests"][name] = {
                     "digest_text": digest_text,
                     "detected_intent": detected_intent,
                     "charts": []
                 }
-
+ 
             try:
                 with open(cache_path, "w", encoding="utf-8") as f:
                     json.dump(cache_data, f, indent=2, default=str)
@@ -1005,7 +1069,12 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
             output_format=output_format,
             doc_type=doc_type,
             cross_file_context=cross_file_context,
-            official_format_spec=official_format_spec
+            official_format_spec=official_format_spec,
+            cross_file_insights=cross_file_insights,
+            file_data=file_data,
+            entity_map=entity_map,
+            links=links,
+            ranked_files=ranked_files,
         )
  
         if doc_type not in _OFFICIAL_DOC_TYPES:
@@ -1033,9 +1102,9 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
     else:
         logger.info("[Orchestrator] Output validation passed.")
  
-    # -- STEP 4d -- Self-correction (has_files path only) ← NEW ---------------
+    # -- STEP 4d -- Self-correction (has_files path only) ----------------------
     if has_files and validation_warnings and digest_results:
-        corrected = _self_correct_body(
+        corrected, correction_charts = _self_correct_body(
             body                 = body,
             warnings             = validation_warnings,
             prompt               = prompt,
@@ -1044,9 +1113,27 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
             official_format_spec = official_format_spec,
             digest_results       = digest_results,
             cross_file_context   = cross_file_context,
+            cross_file_insights  = cross_file_insights,
+            file_data            = file_data,
+            entity_map           = entity_map,
+            links                = links,
+            ranked_files         = ranked_files,
         )
         if corrected != body:
             body = corrected
+ 
+            # FIX: For non-official docs, merge any charts from corrected body.
+            # Dedup against existing seen_signatures to avoid duplicates.
+            if correction_charts and doc_type not in _OFFICIAL_DOC_TYPES:
+                deduped_correction, seen_signatures = dedup_charts(
+                    correction_charts, seen_signatures
+                )
+                ordered_charts.extend(deduped_correction)
+                logger.info(
+                    f"[Orchestrator] Self-correction added {len(deduped_correction)} "
+                    f"new chart(s) from corrected body."
+                )
+ 
             # Re-validate after correction so final warnings reflect corrected output
             post_warnings = _validate_body(
                 body, file_data, cross_file_insights,
@@ -1059,7 +1146,6 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
                 f"{fixed} warning(s) resolved, {remaining} remaining."
             )
             if isinstance(warnings_out, list):
-                # Replace old warnings with post-correction set
                 warnings_out.clear()
                 warnings_out.extend(post_warnings)
  
@@ -1078,7 +1164,10 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
         selected  = {}
         remaining = []
         for chart in charts:
-            title_c, path, sig = chart
+            if isinstance(chart, dict):
+                title_c = chart.get("title", "")
+            else:
+                title_c = chart[0]
             title_lower = title_c.lower()
             matched_cat = None
             for cat, keywords in categories.items():
@@ -1101,14 +1190,28 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
  
     ordered_charts = select_top_high_value_charts(ordered_charts, max_charts=6)
     logger.info(f"Total charts to embed: {len(ordered_charts)}")
-    verified = [(h, p, col) for h, p, _sig, col in ordered_charts if os.path.exists(p)]
+    verified = []
+    for chart in ordered_charts:
+        if isinstance(chart, dict):
+            p = chart.get("path", "")
+            if os.path.exists(p):
+                verified.append(chart)
+        else:
+            p = chart[1]
+            if os.path.exists(p):
+                verified.append({
+                    "title": chart[0],
+                    "path": p,
+                    "signature": chart[2],
+                    "column": chart[3] if len(chart) > 3 else ""
+                })
     logger.info(f"Verified chart paths: {len(verified)}")
  
     # ==========================================================================
     # STEP 6 -- Write document
     # ==========================================================================
     output_path = _resolve_path(_sanitize(title, output_format))
-
+ 
     # Clean up session cache on success
     if 'cache_path' in locals() and os.path.exists(cache_path):
         try:
@@ -1116,7 +1219,7 @@ def run_agent_from_api(prompt, file_paths=None, file_path=None,
             logger.info(f"Cleaned up session cache: {cache_path}")
         except Exception as cache_cleanup_err:
             logger.warning(f"Failed to delete session cache {cache_path}: {cache_cleanup_err}")
-
+ 
     if output_format == "docx":
         generate_docx(body, output_path, title, chart_images=verified,
                       doc_type=doc_type, user_prompt=prompt)

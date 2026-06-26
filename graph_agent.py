@@ -146,7 +146,12 @@ def _generate_grouped_line_chart(group, file_name):
         )
         if 'path' in result:
             sig = tuple(round(sum(vals), 2) for vals in values_dict.values())
-            return (title, result['path'], sig, ", ".join(c['value_col'] for c in group['columns']))
+            return {
+                "title": title,
+                "path": result['path'],
+                "signature": sig,
+                "column": ", ".join(c['value_col'] for c in group['columns'])
+            }
     except Exception as e:
         logger.warning(f"Grouped line chart failed: {e}")
     return None
@@ -198,7 +203,12 @@ def _charts_from_candidates(candidates, file_name):
             )
             if 'path' in result:
                 sig = tuple(round(v, 2) for v in values)
-                chart_images.append((title, result['path'], sig, vcol))
+                chart_images.append({
+                    "title": title,
+                    "path": result['path'],
+                    "signature": sig,
+                    "column": vcol
+                })
                 logger.info(f"Chart [{chart_type}]: {title} -> {result['path']}")
         except Exception as e:
             logger.warning(f"Chart generation failed for {title}: {e}")
@@ -306,7 +316,12 @@ def _comparable_groups_chart(candidates, file_name):
             )
             if 'path' in result:
                 sig = tuple(values)
-                extra.append((title, result['path'], sig, ", ".join(c['value_col'] for c in group['columns'])))
+                extra.append({
+                    "title": title,
+                    "path": result['path'],
+                    "signature": sig,
+                    "column": ", ".join(c['value_col'] for c in group['columns'])
+                })
                 logger.info(f"Comparison chart [{file_name}]: {title} -> {result['path']}")
         except Exception as e:
             logger.warning(f"Comparison chart generation failed: {e}")
@@ -344,7 +359,12 @@ def generate_charts_from_markers(text):
             )
             if 'path' in r:
                 sig = tuple(round(float(v), 2) for v in m['values'])
-                chart_images.append((m.get('title', ''), r['path'], sig, ""))
+                chart_images.append({
+                    "title": m.get('title', ''),
+                    "path": r['path'],
+                    "signature": sig,
+                    "column": ""
+                })
                 logger.info(f"Marker chart: {m.get('title')} -> {r['path']}")
         except Exception as e:
             logger.warning(f"Marker chart failed: {e}")
@@ -377,20 +397,31 @@ def dedup_charts(chart_list, seen_signatures=None, tolerance=0.01):
  
     deduped = []
     for chart in chart_list:
-        title = chart[0]
-        path = chart[1]
-        sig = chart[2]
-        col = chart[3] if len(chart) > 3 else ""
+        if isinstance(chart, dict):
+            title = chart.get("title", "")
+            path = chart.get("path", "")
+            sig = chart.get("signature")
+            col = chart.get("column", "")
+        else:
+            title = chart[0]
+            path = chart[1]
+            sig = chart[2]
+            col = chart[3] if len(chart) > 3 else ""
         
         if not sig:
-            deduped.append((title, path, sig, col))
+            if isinstance(chart, dict):
+                deduped.append(chart)
+            else:
+                deduped.append({"title": title, "path": path, "signature": sig, "column": col})
             continue
  
-        is_dup = sig in seen_signatures
+        sig_tuple = tuple(sig) if isinstance(sig, (list, tuple)) else sig
+ 
+        is_dup = sig_tuple in seen_signatures
         if not is_dup:
             for existing in seen_signatures:
-                if len(existing) == len(sig) and all(
-                    abs(a - b) <= tolerance for a, b in zip(existing, sig)
+                if len(existing) == len(sig_tuple) and all(
+                    abs(a - b) <= tolerance for a, b in zip(existing, sig_tuple)
                 ):
                     is_dup = True
                     break
@@ -399,8 +430,10 @@ def dedup_charts(chart_list, seen_signatures=None, tolerance=0.01):
             logger.info(f"Dropping duplicate chart: {title}")
             continue
  
-        seen_signatures.add(sig)
-        deduped.append((title, path, sig, col))
+        seen_signatures.add(sig_tuple)
+        if isinstance(chart, dict):
+            deduped.append(chart)
+        else:
+            deduped.append({"title": title, "path": path, "signature": sig, "column": col})
  
     return deduped, seen_signatures
- 

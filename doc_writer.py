@@ -1,6 +1,7 @@
 import os
 import re
 from docx import Document
+from parser_utils import parse_sections, extract_table, strip_table_from_text
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -425,13 +426,18 @@ def generate_docx(body, output_path, title="Generated Document", chart_images=No
         elif level == 3:
             _add_heading(doc, heading, 11, BODY_COLOR)
  
-        if table:
-            _add_table(doc, table)
-        else:
-            _add_body_content(doc, content)
+        # Strip markdown table if present to render clean text followed by table
+        tbl = extract_table(content)
+        clean_content = strip_table_from_text(content) if tbl else content
+ 
+        if clean_content:
+            _add_body_content(doc, clean_content)
+        if tbl:
+            _add_table(doc, tbl)
  
         for idx in assignments.get(sec_idx, []):
-            img_path = chart_images[idx][1]
+            chart = chart_images[idx]
+            img_path = chart.get("path", "") if isinstance(chart, dict) else chart[1]
             _add_image(doc, img_path)
  
     if unplaced_idx:
@@ -443,7 +449,8 @@ def generate_docx(body, output_path, title="Generated Document", chart_images=No
         para.space_after = Pt(8)
  
         for idx in unplaced_idx:
-            img_path = chart_images[idx][1]
+            chart = chart_images[idx]
+            img_path = chart.get("path", "") if isinstance(chart, dict) else chart[1]
             _add_image(doc, img_path)
  
     if is_official:
@@ -509,15 +516,29 @@ def _dedupe_charts(chart_images):
     seen_titles = set()
     result = []
     for chart in chart_images:
-        ct = chart[0]
-        path = chart[1]
-        col = chart[2] if len(chart) > 2 else ""
+        if isinstance(chart, dict):
+            ct = chart.get("title", "")
+            path = chart.get("path", "")
+            col = chart.get("column", "")
+        else:
+            ct = chart[0]
+            path = chart[1]
+            col = chart[2] if len(chart) > 2 else ""
+            
         norm_title = ct.lower().strip()
         if path in seen_paths or norm_title in seen_titles:
             continue
         seen_paths.add(path)
         seen_titles.add(norm_title)
-        result.append((ct, path, col))
+        
+        if isinstance(chart, dict):
+            result.append(chart)
+        else:
+            result.append({
+                "title": ct,
+                "path": path,
+                "column": col
+            })
     return result
  
  
@@ -547,40 +568,6 @@ def clean_text(text):
     return "\n".join(lines)
  
  
-def parse_sections(text):
-    pattern = re.compile(r'^(#{1,3})\s+(.*)$', re.MULTILINE)
-    matches = list(pattern.finditer(text))
- 
-    if not matches:
-        return [{'level': 0, 'heading': '', 'body': text.strip(), 'table': None}]
- 
-    sections = []
-    if matches[0].start() > 0:
-        pre = text[:matches[0].start()].strip()
-        if pre:
-            sections.append({'level': 0, 'heading': '', 'body': pre, 'table': None})
- 
-    for i, m in enumerate(matches):
-        body = text[m.end(): matches[i+1].start() if i+1 < len(matches) else len(text)].strip()
-        sections.append({
-            'level':   len(m.group(1)),
-            'heading': m.group(2).strip(),
-            'body':    body,
-            'table':   _extract_table(body)
-        })
-    return sections
- 
- 
-def _extract_table(text):
-    lines = [l.strip() for l in text.splitlines() if '|' in l]
-    if len(lines) < 2:
-        return None
-    rows = [l for l in lines if not re.match(r'^[\|\s\-:]+$', l)]
-    if len(rows) < 2:
-        return None
-    return [[c.strip() for c in r.split('|') if c.strip()] for r in rows]
- 
- 
 # ── Chart-to-section matching ──────────────────────────────────────────────────
  
 STOP = {'by', 'and', 'the', 'of', 'in', 'a', 'an', 'to', 'for', 'from', 'with', 'data',
@@ -607,9 +594,14 @@ def _assign_charts_to_sections(sections, chart_images):
     unplaced = []
  
     for idx, chart in enumerate(chart_images):
-        ct = chart[0]
-        img_path = chart[1]
-        col = chart[2] if len(chart) > 2 else ""
+        if isinstance(chart, dict):
+            ct = chart.get("title", "")
+            img_path = chart.get("path", "")
+            col = chart.get("column", "")
+        else:
+            ct = chart[0]
+            img_path = chart[1]
+            col = chart[2] if len(chart) > 2 else ""
         
         if not os.path.exists(img_path):
             continue

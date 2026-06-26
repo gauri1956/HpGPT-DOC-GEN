@@ -3,7 +3,8 @@ import logging
 import re
 from collections import Counter
  
-from llm_agent import query_llama, get_doctype_rules, get_cross_file_rules
+from llm_agent import query_llama, get_doctype_rules, get_cross_file_rules, PROMPT_TOKEN_BUDGET, get_system_prompt
+from data_fusion_agent import render_context
  
 logger = logging.getLogger(__name__)
  
@@ -265,8 +266,13 @@ def _build_digest_prompt(intent: str) -> str:
  
  
 # ==============================================================================
-# NEW: strip [src:] and [conf:] tags from digest before passing to run_insight
-# The tags are for validation only — they should not appear in the final report.
+# Strip [src:] and [conf:] tags from digest text.
+# Called in TWO places:
+#   1. run_analysis() return — so the CACHED digest (used for chart extraction
+#      and passed to run_insight) is clean. Orchestrator calls _validate_digest()
+#      on the RAW result BEFORE stripping, then strips before caching.
+#   2. run_insight() — belt-and-suspenders strip on whatever comes in, in case
+#      a cached digest already had tags stripped or still has some.
 # ==============================================================================
  
 def _strip_digest_tags(digest_text: str) -> str:
@@ -274,6 +280,7 @@ def _strip_digest_tags(digest_text: str) -> str:
     Remove [src: ...] and [conf: ...] tags from digest text.
     Called before digest_results are passed to run_insight() so the LLM
     doesn't see or reproduce the internal validation tags in the final document.
+    Also called by run_analysis() so the returned digest is tag-free for caching.
     """
     cleaned = re.sub(r'\[src:[^\]]*\]', '', digest_text)
     cleaned = re.sub(r'\[conf:[^\]]*\]', '', cleaned)
@@ -282,8 +289,37 @@ def _strip_digest_tags(digest_text: str) -> str:
     return cleaned.strip()
  
  
+def _compress_digest(digest_text: str) -> str:
+    """
+    Compresses a digest text to retain only critical structured facts.
+    - Preserves bullet points (lines starting with '-')
+    - Preserves heading indicators (lines starting with '#')
+    - Preserves chart references (lines containing '[CHART:')
+    - Filters out conversational introductions, verbose paragraphs, and concluding remarks.
+    """
+    if not digest_text:
+        return ""
+    
+    compressed_lines = []
+    for line in digest_text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        
+        # Keep headings, bullet points, and chart references
+        if s.startswith('#') or s.startswith('-') or s.startswith('*') or '[CHART:' in s:
+            compressed_lines.append(line)
+        # Keep short lines containing metric values (numeric digits) if they look like findings
+        elif any(c.isdigit() for c in s) and len(s) < 150:
+            compressed_lines.append("- " + s if not s.startswith("-") else s)
+            
+    return "\n".join(compressed_lines).strip()
+ 
+ 
 # ==============================================================================
-# NEW: extract structured facts from digest for validation
+# Extract structured facts from digest for validation.
+# Called by orchestrator._validate_digest() on the RAW tagged digest
+# (before tags are stripped) so [src:] presence can be checked.
 # ==============================================================================
  
 def _extract_digest_facts(digest_text: str, file_name: str) -> list[dict]:
@@ -339,14 +375,18 @@ def run_analysis(data, instruction, intent: str = None, dataset_role: str = None
     Extract a fact-digest from a single dataset. Output is bullet points with
     real numbers (and optional chart markers) -- no report structure.
  
-    KEY CHANGE: digest now includes [src: <column>] and [conf: direct|derived]
-    tags on every numeric bullet. These tags allow the orchestrator's
-    _validate_digest() to do structured validation without an extra LLM call.
-    The tags are stripped before digest_results are passed to run_insight().
+    KEY DESIGN:
+    - The LLM is prompted to include [src: <column>] and [conf: direct|derived]
+      tags on every numeric bullet.
+    - The RAW tagged result is returned so the orchestrator can call
+      _validate_digest() on it BEFORE stripping. The orchestrator is responsible
+      for stripping tags before passing to run_insight() and before caching.
+    - This function does NOT strip tags — that separation keeps _validate_digest()
+      able to do its job on the raw output.
  
-    Returns: (digest_text, intent)
-        digest_text: raw tagged digest (tags stripped by caller before run_insight)
-        intent:      detected or passed-in intent string
+    Returns: (tagged_digest_text, intent)
+        tagged_digest_text: raw digest WITH [src:]/[conf:] tags intact
+        intent:             detected or passed-in intent string
     """
     from data_agent import detect_content_intent
  
@@ -365,6 +405,16 @@ def run_analysis(data, instruction, intent: str = None, dataset_role: str = None
  
     digest_prompt = _build_digest_prompt(intent)
     
+    def estimate_tokens(prompt_str: str) -> int:
+        return (len(digest_prompt) + len(prompt_str)) // 4
+ 
+    trend_lines = []
+    if isinstance(data, dict):
+        trends = data.get("trends", {})
+        if trends:
+            for col, t in trends.items():
+                trend_lines.append(f"  - Column '{col}': {t.get('trend_signal', '')}")
+ 
     if isinstance(data, dict) and data.get("type") in ("tabular", "multi_sheet"):
         smart_data = {
             "file": data.get("file"),
@@ -379,72 +429,166 @@ def run_analysis(data, instruction, intent: str = None, dataset_role: str = None
             smart_data["sheets_summary"] = data["sheets_summary"]
         if "cross_sheet_entities" in data:
             smart_data["cross_sheet_entities"] = data["cross_sheet_entities"]
-        data_summary = json.dumps(smart_data, indent=2, default=str)
+ 
+        def build_prompt_with_data(sd):
+            ds = json.dumps(sd, indent=2, default=str)
+            p_lines = [
+                f"Instruction (for context only -- see rules above about ignoring its structure): {instruction}",
+                f"Dataset: {data.get('file', 'unknown')}"
+            ]
+            if dataset_role:
+                p_lines.append(f"Dataset Role: {dataset_role}")
+            if causal_hints:
+                hints_str = "\n".join(f"- {h}" for h in causal_hints)
+                p_lines.append(f"Causal Hints / Expected Relationships:\n{hints_str}")
+            if trend_lines:
+                p_lines.append(
+                    "Detected Chronological Trend Directions (MUST be preserved and directly cited in your analysis):\n"
+                    + "\n".join(trend_lines)
+                )
+            if prior_digests_summary:
+                p_lines.append(
+                    "PRIOR DIGESTS SUMMARY (Do NOT repeat or duplicate the findings, trends, or facts "
+                    "already captured in these previous files. Focus on new, unique insights, or contrast "
+                    "them with these prior findings):\n" + prior_digests_summary
+                )
+            p_lines.append(f"Data:\n{ds}")
+            return "\n\n".join(p_lines)
+ 
+        prompt = build_prompt_with_data(smart_data)
+        tokens = estimate_tokens(prompt)
+        logger.info(f"[TokenBudget] Single-file digest initial tokens: {tokens} (Budget limit: {PROMPT_TOKEN_BUDGET})")
+ 
+        # Step 1: Remove sample
+        if tokens > PROMPT_TOKEN_BUDGET and "sample" in smart_data:
+            logger.info("[TokenBudget] Single-file digest Step 1: Removing sample data...")
+            smart_data.pop("sample", None)
+            prompt = build_prompt_with_data(smart_data)
+            tokens = estimate_tokens(prompt)
+ 
+        # Step 2: Remove entity_stats
+        if tokens > PROMPT_TOKEN_BUDGET and "entity_stats" in smart_data:
+            logger.info("[TokenBudget] Single-file digest Step 2: Removing entity stats...")
+            smart_data.pop("entity_stats", None)
+            prompt = build_prompt_with_data(smart_data)
+            tokens = estimate_tokens(prompt)
+ 
+        # Step 3: Remove cross_sheet_entities
+        if tokens > PROMPT_TOKEN_BUDGET and "cross_sheet_entities" in smart_data:
+            logger.info("[TokenBudget] Single-file digest Step 3: Removing cross sheet entities...")
+            smart_data.pop("cross_sheet_entities", None)
+            prompt = build_prompt_with_data(smart_data)
+            tokens = estimate_tokens(prompt)
+ 
+        # Step 4: Remove sheets_summary
+        if tokens > PROMPT_TOKEN_BUDGET and "sheets_summary" in smart_data:
+            logger.info("[TokenBudget] Single-file digest Step 4: Removing sheets summary...")
+            smart_data.pop("sheets_summary", None)
+            prompt = build_prompt_with_data(smart_data)
+            tokens = estimate_tokens(prompt)
+ 
+        # Step 5: Remove stats
+        if tokens > PROMPT_TOKEN_BUDGET and "stats" in smart_data:
+            logger.info("[TokenBudget] Single-file digest Step 5: Removing stats...")
+            smart_data.pop("stats", None)
+            prompt = build_prompt_with_data(smart_data)
+            tokens = estimate_tokens(prompt)
+ 
+        # Step 6: Hard truncation of data section
+        if tokens > PROMPT_TOKEN_BUDGET:
+            logger.info("[TokenBudget] Single-file digest Step 6: Hard truncating data summary...")
+            allowed_chars = max(1000, PROMPT_TOKEN_BUDGET * 4 - len(prompt) + len(json.dumps(smart_data, indent=2, default=str)))
+            ds = json.dumps(smart_data, indent=2, default=str)[:allowed_chars]
+            p_lines = [
+                f"Instruction (for context only -- see rules above about ignoring its structure): {instruction}",
+                f"Dataset: {data.get('file', 'unknown')}"
+            ]
+            if dataset_role:
+                p_lines.append(f"Dataset Role: {dataset_role}")
+            if causal_hints:
+                hints_str = "\n".join(f"- {h}" for h in causal_hints)
+                p_lines.append(f"Causal Hints / Expected Relationships:\n{hints_str}")
+            if trend_lines:
+                p_lines.append(
+                    "Detected Chronological Trend Directions (MUST be preserved and directly cited in your analysis):\n"
+                    + "\n".join(trend_lines)
+                )
+            if prior_digests_summary:
+                p_lines.append(
+                    "PRIOR DIGESTS SUMMARY (Do NOT repeat or duplicate the findings, trends, or facts "
+                    "already captured in these previous files. Focus on new, unique insights, or contrast "
+                    "them with these prior findings):\n" + prior_digests_summary
+                )
+            p_lines.append(f"Data:\n{ds}\n[TRUNCATED FOR BUDGET]")
+            prompt = "\n\n".join(p_lines)
+            tokens = estimate_tokens(prompt)
+ 
+        logger.info(f"[TokenBudget] Single-file digest final tokens: {tokens}")
     else:
-        data_summary = json.dumps(data, indent=2, default=str)[:8000]
+        if isinstance(data, dict):
+            data_summary = json.dumps(data, indent=2, default=str)
+        else:
+            data_summary = str(data)
  
-    prompt_lines = [
-        f"Instruction (for context only -- see rules above about ignoring its "
-        f"structure): {instruction}",
-        f"Dataset: {data.get('file', 'unknown')}"
-    ]
+        def build_prompt_with_str(ds_str):
+            p_lines = [
+                f"Instruction (for context only -- see rules above about ignoring its structure): {instruction}",
+                f"Dataset: {data.get('file', 'unknown') if isinstance(data, dict) else 'unknown'}"
+            ]
+            if dataset_role:
+                p_lines.append(f"Dataset Role: {dataset_role}")
+            if causal_hints:
+                hints_str = "\n".join(f"- {h}" for h in causal_hints)
+                p_lines.append(f"Causal Hints / Expected Relationships:\n{hints_str}")
+            if trend_lines:
+                p_lines.append(
+                    "Detected Chronological Trend Directions (MUST be preserved and directly cited in your analysis):\n"
+                    + "\n".join(trend_lines)
+                )
+            if prior_digests_summary:
+                p_lines.append(
+                    "PRIOR DIGESTS SUMMARY (Do NOT repeat or duplicate the findings, trends, or facts "
+                    "already captured in these previous files. Focus on new, unique insights, or contrast "
+                    "them with these prior findings):\n" + prior_digests_summary
+                )
+            p_lines.append(f"Data:\n{ds_str}")
+            return "\n\n".join(p_lines)
  
-    if dataset_role:
-        prompt_lines.append(f"Dataset Role: {dataset_role}")
+        prompt = build_prompt_with_str(data_summary)
+        tokens = estimate_tokens(prompt)
+        if tokens > PROMPT_TOKEN_BUDGET:
+            logger.info("[TokenBudget] Single-file digest: Truncating plain data summary string...")
+            allowed_chars = max(1000, PROMPT_TOKEN_BUDGET * 4 - len(prompt) + len(data_summary))
+            data_summary = data_summary[:allowed_chars] + "\n[TRUNCATED FOR BUDGET]"
+            prompt = build_prompt_with_str(data_summary)
+            tokens = estimate_tokens(prompt)
+            logger.info(f"[TokenBudget] Single-file digest final tokens after truncation: {tokens}")
  
-    if causal_hints:
-        hints_str = "\n".join(f"- {h}" for h in causal_hints)
-        prompt_lines.append(f"Causal Hints / Expected Relationships:\n{hints_str}")
- 
-    trend_lines = []
-    if isinstance(data, dict):
-        trends = data.get("trends", {})
-        if trends:
-            for col, t in trends.items():
-                trend_lines.append(f"  - Column '{col}': {t.get('trend_signal', '')}")
- 
-    if trend_lines:
-        prompt_lines.append(
-            "Detected Chronological Trend Directions (MUST be preserved and directly cited in your analysis):\n"
-            + "\n".join(trend_lines)
-        )
- 
-    if prior_digests_summary:
-        prompt_lines.append(
-            "PRIOR DIGESTS SUMMARY (Do NOT repeat or duplicate the findings, trends, or facts "
-            "already captured in these previous files. Focus on new, unique insights, or contrast "
-            "them with these prior findings):\n" + prior_digests_summary
-        )
-
-    prompt_lines.append(f"Data:\n{data_summary}")
-    prompt = "\n\n".join(prompt_lines)
- 
+    # Raw result contains [src:]/[conf:] tags — returned as-is so the orchestrator
+    # can run _validate_digest() on the tagged text, then strip before caching/insight.
     result = query_llama(prompt, output_type="pdf", system_override=digest_prompt)
-    logger.info(f"Digest complete for: {data.get('file', 'unknown')} (intent={intent})")
+    logger.info(f"Digest complete for: {data.get('file', 'unknown') if isinstance(data, dict) else 'unknown'} (intent={intent})")
  
+    # Return the RAW tagged digest. The orchestrator validates, then strips.
     return result, intent
  
  
 def run_insight(all_results, user_prompt, output_format="pdf",
                 doc_type: str = None, cross_file_context: str = "",
-                official_format_spec: str = None):
+                official_format_spec: str = None,
+                cross_file_insights: list = None,
+                file_data: dict = None,
+                entity_map: dict = None,
+                links: list = None,
+                ranked_files: list = None):
     """
     Build the SINGLE integrated report from all per-file digests.
+    Includes proactive Token-Budget check and Progressive Trimming.
  
-    KEY CHANGE: digest texts are stripped of [src:] and [conf:] tags before
-    being passed to the LLM. This prevents the internal validation tags from
-    appearing in the final document while keeping them available for the
-    orchestrator's pre-call validation pass.
- 
-    Args:
-        all_results          : list of (digest_text, intent) tuples from run_analysis()
-        user_prompt          : original user request string
-        output_format        : "docx" | "pdf" | "pptx"
-        doc_type             : detected document type
-        cross_file_context   : text block produced by DataFusionAgent
-        official_format_spec : format spec from _resolve_official_format()
- 
-    Returns: (report_text, dominant_intent)
+    Expects digests in all_results to already have [src:]/[conf:] tags stripped
+    (the orchestrator strips them after _validate_digest() and before caching).
+    Belt-and-suspenders: _strip_digest_tags() is applied here too in case any
+    tagged digest slips through (e.g. from an old cache entry).
     """
     # Support both (text, intent) tuples and plain strings
     if all_results and isinstance(all_results[0], tuple):
@@ -454,7 +598,9 @@ def run_insight(all_results, user_prompt, output_format="pdf",
         raw_digests = all_results
         intents     = ["analytical"] * len(all_results)
  
-    # Strip [src:] / [conf:] tags — these are for validation only, not for the LLM
+    # Belt-and-suspenders strip — tags should already be gone if orchestrator
+    # stripped before caching, but this catches any old cache entries or
+    # direct callers that bypass the orchestrator strip step.
     digests = [_strip_digest_tags(d) for d in raw_digests]
  
     dominant_intent = (
@@ -476,7 +622,8 @@ def run_insight(all_results, user_prompt, output_format="pdf",
             f"skipping separate doctype_rules injection."
         )
     else:
-        doctype_rules = get_doctype_rules(effective_type)
+        is_combined = file_data is not None and len(file_data) >= 2
+        doctype_rules = get_doctype_rules(effective_type, is_combined=is_combined)
  
     intent_instruction = _INSIGHT_INTENT_INSTRUCTIONS.get(
         effective_type,
@@ -486,70 +633,154 @@ def run_insight(all_results, user_prompt, output_format="pdf",
         )
     )
  
-    combined = "\n\n---\n\n".join(
-        f"Facts from dataset {i + 1}:\n{digest}"
-        for i, digest in enumerate(digests)
-    )[:3500]
- 
-    prompt_parts = [user_prompt.strip()]
- 
-    if official_format_spec and official_format_spec.strip():
-        prompt_parts.append(official_format_spec.strip())
-        logger.info(
-            f"[run_insight] Official format spec injected "
-            f"({len(official_format_spec)} chars) for doc_type='{effective_type}'."
+    # 1. Compress digests by default (Step 1 of baseline compression)
+    compressed_digests = [_compress_digest(d) for d in digests]
+    
+    # Render initial context if insights are provided
+    current_insights = list(cross_file_insights) if cross_file_insights else []
+    # Only keep Critical and High priority initially (Medium/Low are omitted from prompt)
+    current_insights = [i for i in current_insights if i.priority in ("Critical", "High")]
+    
+    if cross_file_insights and file_data and entity_map is not None:
+        cross_file_context = render_context(file_data, entity_map, links, [], current_insights, ranked_files)
+        
+    system_prompt = get_system_prompt(output_format, effective_type, has_files=True)
+    
+    def estimate_tokens(prompt_str: str) -> int:
+        return (len(system_prompt) + len(prompt_str)) // 4
+        
+    def assemble_prompt(current_digs, current_ctx):
+        combined = "\n\n---\n\n".join(
+            f"Facts from dataset {i + 1}:\n{d}"
+            for i, d in enumerate(current_digs)
         )
-    else:
-        logger.info(f"[run_insight] No official format spec -- standard generation.")
+        parts = [user_prompt.strip()]
+        if official_format_spec and official_format_spec.strip():
+            parts.append(official_format_spec.strip())
+        if current_ctx and current_ctx.strip():
+            parts.append(
+                "================================================\n"
+                "CROSS-FILE INTELLIGENCE -- READ THIS FIRST\n"
+                "================================================\n"
+                + current_ctx.strip()
+            )
+            parts.append(get_cross_file_rules())
+        parts.append(intent_instruction)
+        if doctype_rules:
+            parts.append(doctype_rules)
+            
+        if is_official and current_digs and any(d.strip() for d in current_digs):
+            parts.append(
+                f"The following fact-digests were extracted from {len(current_digs)} uploaded file(s). "
+                f"Incorporate any relevant facts, specifications, quantities, or figures from these "
+                f"digests into the appropriate sections of the document. Do NOT invent data, but DO "
+                f"use whatever is provided here to make the document more specific and substantive.\n"
+                f"If no relevant data is present, generate realistic HPCL-appropriate content based "
+                f"on the subject matter of the document."
+            )
+        elif not is_official:
+            parts.append(
+                f"You have been given fact-digests extracted from {len(current_digs)} "
+                f"dataset(s) below. Each digest contains real numbers taken directly from "
+                f"the underlying data (or simple calculations from those numbers). Use ONLY "
+                f"these facts and numbers -- do not invent, estimate, or assume any additional "
+                f"figures beyond what is given or directly derivable from them. "
+                f"Specifically:\n"
+                f"- Do NOT invent KPIs, compliance rates, percentages, forecasts, or risk scores.\n"
+                f"- Present assumptions explicitly as assumptions, never as verified facts.\n"
+                f"- PRESERVE TREND DIRECTIONS: Strictly preserve all trend directions shown in the digests.\n"
+                f"- COMPATIBLE METRICS ONLY: Never compare metrics with incompatible units.\n"
+                f"- Write ONE integrated document covering all datasets together, following the document "
+                f"type structure and formatting rules above."
+            )
+        parts.append(combined)
+        return "\n\n".join(parts)
  
-    if cross_file_context and cross_file_context.strip():
-        prompt_parts.append(
-            "================================================\n"
-            "CROSS-FILE INTELLIGENCE -- READ THIS FIRST\n"
-            "================================================\n"
-            + cross_file_context.strip()
-        )
-        prompt_parts.append(get_cross_file_rules())
-        logger.info(
-            f"[run_insight] Cross-file context injected "
-            f"({len(cross_file_context)} chars)."
-        )
-    else:
-        logger.info("[run_insight] No cross-file context -- single-file or fusion skipped.")
+    prompt = assemble_prompt(compressed_digests, cross_file_context)
+    tokens = estimate_tokens(prompt)
+    logger.info(f"[TokenBudget] Initial prompt tokens: {tokens} (Budget limit: {PROMPT_TOKEN_BUDGET})")
  
-    prompt_parts.append(intent_instruction)
+    # PROGRESSIVE TRIMMING LOOP
+    # Step 1: Remove duplicate sentences or redundant paragraphs in digests
+    if tokens > PROMPT_TOKEN_BUDGET:
+        logger.info("[TokenBudget] Step 1: Removing redundant digest text...")
+        for i, d in enumerate(compressed_digests):
+            lines = d.splitlines()
+            seen_lines = set()
+            unique_lines = []
+            for l in lines:
+                l_clean = re.sub(r'[^a-zA-Z0-9]', '', l).lower()
+                if l_clean not in seen_lines:
+                    seen_lines.add(l_clean)
+                    unique_lines.append(l)
+            compressed_digests[i] = "\n".join(unique_lines)
+        prompt = assemble_prompt(compressed_digests, cross_file_context)
+        tokens = estimate_tokens(prompt)
  
-    if doctype_rules:
-        prompt_parts.append(doctype_rules)
+    # Step 2: Reduce cross-file insights (keep only Critical, drop High)
+    if tokens > PROMPT_TOKEN_BUDGET and current_insights:
+        logger.info("[TokenBudget] Step 2: Capping cross-file insights to Critical only...")
+        current_insights = [i for i in current_insights if i.priority == "Critical"]
+        if file_data and entity_map is not None:
+            cross_file_context = render_context(file_data, entity_map, links, [], current_insights, ranked_files)
+        prompt = assemble_prompt(compressed_digests, cross_file_context)
+        tokens = estimate_tokens(prompt)
  
-    if is_official and digests and any(d.strip() for d in digests):
-        prompt_parts.append(
-            f"The following fact-digests were extracted from {len(digests)} uploaded file(s). "
-            f"Incorporate any relevant facts, specifications, quantities, or figures from these "
-            f"digests into the appropriate sections of the document. Do NOT invent data, but DO "
-            f"use whatever is provided here to make the document more specific and substantive.\n"
-            f"If no relevant data is present, generate realistic HPCL-appropriate content based "
-            f"on the subject matter of the document."
-        )
-    elif not is_official:
-        prompt_parts.append(
-            f"You have been given fact-digests extracted from {len(digests)} "
-            f"dataset(s) below. Each digest contains real numbers taken directly from "
-            f"the underlying data (or simple calculations from those numbers). Use ONLY "
-            f"these facts and numbers -- do not invent, estimate, or assume any additional "
-            f"figures beyond what is given or directly derivable from them. "
-            f"Specifically:\n"
-            f"- Do NOT invent KPIs, compliance rates, percentages, forecasts, or risk scores.\n"
-            f"- Present assumptions explicitly as assumptions, never as verified facts.\n"
-            f"- PRESERVE TREND DIRECTIONS: Strictly preserve all trend directions shown in the digests.\n"
-            f"- COMPATIBLE METRICS ONLY: Never compare metrics with incompatible units.\n"
-            f"- Write ONE integrated document covering all datasets together, following the document "
-            f"type structure and formatting rules above."
-        )
+    # Step 3: Shorten detail descriptions of remaining insights
+    if tokens > PROMPT_TOKEN_BUDGET and current_insights:
+        logger.info("[TokenBudget] Step 3: Shortening insight details...")
+        for i in current_insights:
+            sentences = i.detail.split(". ")
+            if sentences:
+                i.detail = sentences[0] + "."
+        if file_data and entity_map is not None:
+            cross_file_context = render_context(file_data, entity_map, links, [], current_insights, ranked_files)
+        prompt = assemble_prompt(compressed_digests, cross_file_context)
+        tokens = estimate_tokens(prompt)
  
-    prompt_parts.append(combined)
+    # Step 4: Remove all cross-file insights from context
+    if tokens > PROMPT_TOKEN_BUDGET and current_insights:
+        logger.info("[TokenBudget] Step 4: Removing all cross-file insights from prompt...")
+        current_insights = []
+        if file_data and entity_map is not None:
+            cross_file_context = render_context(file_data, entity_map, links, [], [], ranked_files)
+        prompt = assemble_prompt(compressed_digests, cross_file_context)
+        tokens = estimate_tokens(prompt)
  
-    prompt = "\n\n".join(prompt_parts)
+    # Step 5: Truncate digests progressively to first 5 bullets
+    if tokens > PROMPT_TOKEN_BUDGET:
+        logger.info("[TokenBudget] Step 5: Truncating digests to top 5 bullets...")
+        for i, d in enumerate(compressed_digests):
+            lines = d.splitlines()
+            bullets = [l for l in lines if l.strip().startswith("-") or l.strip().startswith("*")]
+            non_bullets = [l for l in lines if not (l.strip().startswith("-") or l.strip().startswith("*"))]
+            compressed_digests[i] = "\n".join(non_bullets + bullets[:5])
+        prompt = assemble_prompt(compressed_digests, cross_file_context)
+        tokens = estimate_tokens(prompt)
+ 
+    # Step 6: Truncate digests progressively to first 3 bullets
+    if tokens > PROMPT_TOKEN_BUDGET:
+        logger.info("[TokenBudget] Step 6: Truncating digests to top 3 bullets...")
+        for i, d in enumerate(compressed_digests):
+            lines = d.splitlines()
+            bullets = [l for l in lines if l.strip().startswith("-") or l.strip().startswith("*")]
+            non_bullets = [l for l in lines if not (l.strip().startswith("-") or l.strip().startswith("*"))]
+            compressed_digests[i] = "\n".join(non_bullets + bullets[:3])
+        prompt = assemble_prompt(compressed_digests, cross_file_context)
+        tokens = estimate_tokens(prompt)
+ 
+    # Step 7: Truncate digests progressively to first 1 bullet
+    if tokens > PROMPT_TOKEN_BUDGET:
+        logger.info("[TokenBudget] Step 7: Truncating digests to top 1 bullet...")
+        for i, d in enumerate(compressed_digests):
+            lines = d.splitlines()
+            bullets = [l for l in lines if l.strip().startswith("-") or l.strip().startswith("*")]
+            non_bullets = [l for l in lines if not (l.strip().startswith("-") or l.strip().startswith("*"))]
+            compressed_digests[i] = "\n".join(non_bullets + bullets[:1])
+        prompt = assemble_prompt(compressed_digests, cross_file_context)
+        tokens = estimate_tokens(prompt)
+ 
+    logger.info(f"[TokenBudget] Final prompt size: {len(prompt)} chars (~{estimate_tokens(prompt)} tokens)")
  
     result = query_llama(
         prompt,
@@ -568,3 +799,4 @@ def run_insight(all_results, user_prompt, output_format="pdf",
     )
  
     return result, dominant_intent
+ 

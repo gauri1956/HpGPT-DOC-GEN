@@ -5,9 +5,9 @@ import random
 import requests
 from dotenv import load_dotenv
 import logging
- 
+
 load_dotenv()
- 
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError(
@@ -17,275 +17,176 @@ if not GROQ_API_KEY:
 GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"
 MODEL_NAME     = "llama-3.3-70b-versatile"
 FALLBACK_MODEL = "llama-3.1-8b-instant"
- 
-# -- Chart marker guide --------------------------------------------------------
+
+# ── Token budget ──────────────────────────────────────────────────────────────
+# PROMPT_TOKEN_BUDGET is exported so analysis_agent and agent_orchestrator can
+# gate their own prompt assembly before calling query_llama.
+# llm_agent itself never trims or rewrites the prompt it receives.
+MODEL_CONTEXT_LIMIT    = 8192
+RESERVED_OUTPUT_TOKENS = 2500
+SYSTEM_PROMPT_OVERHEAD = 900   # conservative estimate for assembled system prompt
+PROMPT_TOKEN_BUDGET    = MODEL_CONTEXT_LIMIT - RESERVED_OUTPUT_TOKENS - SYSTEM_PROMPT_OVERHEAD
+# = 4792 tokens available for the USER message (digests + context + instructions)
+
+# ── Chart marker guide ────────────────────────────────────────────────────────
 CHART_MARKER_GUIDE = """
-When your content would benefit from a chart, insert a marker on its own line in EXACTLY this format:
+When your content would benefit from a chart, insert a marker on its own line:
 [CHART: bar | title=Revenue by Quarter | labels=Q1,Q2,Q3,Q4 | values=12.5,18.2,15.0,22.1 | y_label=Revenue (M)]
 [CHART: line | title=Growth Trend | labels=Jan,Feb,Mar | values=100,120,140 | y_label=Units]
 [CHART: pie | title=Market Share | labels=HP,Dell,Lenovo | values=35,28,37]
 [CHART: horizontal_bar | title=Team Performance | labels=Sales,Support,Dev | values=88,92,76 | x_label=Score]
- 
-STRICT rules for chart markers:
-- Place the marker on its own line, never inside a sentence or paragraph
-- labels and values must have the same count
-- Values must be plain numbers only -- no %, $, commas, or units inside values
-- Only insert a marker where a chart genuinely adds value
-- Do NOT describe the chart in text -- the chart speaks for itself
-- Do NOT write [CHART: ...] inside bullet points or sentences
-- Place the chart marker IMMEDIATELY after the paragraph it supports -- not at the end of the document
+
+Rules: place on its own line; labels and values must match in count; values are plain numbers only;
+only insert where a chart genuinely adds value; do NOT describe the chart in text.
 """
- 
-# -- Chart coverage rules ------------------------------------------------------
+
 _CHART_COVERAGE_RULES = (
-    "\nCHART COVERAGE -- CRITICAL:\n"
-    "- For analytical, operational, financial, and KPI datasets, insert charts whenever meaningful numeric data exists.\n"
-    "- For educational, informational, policy, compliance, SOP, and training documents, charts are OPTIONAL.\n"
-    "- Do NOT create charts solely to satisfy formatting requirements.\n"
-    "- If no meaningful numeric data exists, do not generate chart markers.\n"
-    "- If a dataset has a time/period column paired with a numeric column, prefer a line chart.\n"
-    "- If a dataset has a categorical column paired with a numeric column, prefer a bar or horizontal_bar chart.\n"
+    "\nCHART COVERAGE:\n"
+    "- Insert charts for analytical/operational/financial/KPI datasets with meaningful numeric data.\n"
+    "- Charts are optional for educational, policy, SOP, and training documents.\n"
+    "- Prefer line charts for time-series, bar/horizontal_bar for categorical comparisons.\n"
 )
- 
-# -- Core rules -- applied to ALL prompts --------------------------------------
-_BASE_CORE_RULES = (
-    "Use organization-specific branding (like HPCL) only when explicitly present in the source files or requested by the user.\n"
-    "Every sentence must be complete -- never end mid-word or mid-thought.\n"
-    "Do not include placeholder text like '[insert data here]' or '[TBD]'.\n"
+
+# ── Core rules (all prompts) ──────────────────────────────────────────────────
+_CORE_RULES = (
+    "Use organization-specific branding (e.g. HPCL) only when explicitly present in source files or requested.\n"
+    "Every sentence must be complete. Do not include placeholder text like '[insert data here]' or '[TBD]'.\n"
     "Start your response with a # title.\n"
+    "Do NOT invent corporate examples, case studies, or specific facts unless explicitly in the source.\n"
+    "NEVER wrap dataset/file/column names in quotes.\n"
+    "Derive the document title from the source material, not from generic labels.\n"
+    "HEADING ACCURACY: Every ## or ### heading must accurately label ALL content that follows it until the next heading.\n"
+    "NUMBER FORMATTING: Round all numeric values to at most ONE decimal place. Whole numbers need no decimal point.\n"
+    "NO REPETITION: State each fact, statistic, or finding ONLY ONCE in the entire document.\n"
+    "LANGUAGE VARIETY: Vary sentence openers; do not overuse 'could indicate', 'indicating a', 'this suggests'.\n"
 )
 
-# -- Report core rules -- applied only to report, training, or analytical documents
-_REPORT_CORE_RULES = (
-    "Do NOT invent corporate examples, case studies, scenarios, or specific facts for HPCL or any other organization unless they are explicitly present in the source document or explicitly requested by the user.\n"
-    "NEVER wrap dataset names, file names, or column names in quotes.\n"
-    "For uploaded documents, derive the title primarily from the source material and document content.\n"
-    "Do not generate generic titles such as Employee Training Program, Development Program, KPI Dashboard, Learning Module, or Training Presentation unless those phrases explicitly appear in the source material.\n"
-    "\n"
-    "HEADING ACCURACY -- CRITICAL:\n"
-    "- Every ## or ### heading must be an accurate label for ALL the content\n"
-    "  that follows it until the next heading.\n"
-    "- Before writing content under a heading, check: does every sentence/bullet\n"
-    "  match what this heading promises If a point belongs to a different topic,\n"
-    "  move it to the correct section or rename the heading.\n"
-    "- Never use a generic heading as a catch-all for leftover points.\n"
-    "\n"
-    "NUMBER FORMATTING -- CRITICAL:\n"
-    "- Round all numeric values in sentences to at most ONE decimal place.\n"
-    "- If a number is a whole number, write it with NO decimal point at all.\n"
-    "- Never write more than one decimal place.\n"
-    "\n"
-    "NO REPETITION -- CRITICAL:\n"
-    "- State each fact, statistic, or finding ONLY ONCE in the entire document.\n"
-    "- Do not restate the same number or insight in a later section.\n"
-    "\n"
-    "LANGUAGE VARIETY -- CRITICAL:\n"
-    "- Do not overuse phrases like 'could indicate', 'indicating a', 'this suggests'.\n"
-    "- Vary sentence openers and verbs across the whole document.\n"
+# ── Grounding rules (file-based prompts only) ─────────────────────────────────
+_GROUNDING_RULES = (
+    "\nDOCUMENT-TYPE ADAPTATION:\n"
+    "Apply analytical/business-impact reasoning ONLY for business, financial, KPI, or operational reports.\n"
+    "For educational, policy, compliance, and SOP documents: focus on explanation, procedures, and knowledge transfer.\n"
+
+    "\nDATA GROUNDING:\n"
+    "Before writing ANY section, scan ALL dataset summaries -- every file, every column, every stat block.\n"
+    "NEVER write that a topic is 'not available' unless you have checked every dataset and found no related column.\n"
+    "Every dataset provided must be referenced by at least one specific statistic.\n"
+
+    "\nNO HALLUCINATION:\n"
+    "NEVER invent Reference Numbers, Employee Names, Budgets, Vendors, KPI targets, or Dates unless explicitly provided.\n"
+    "For required but missing fields: use underlines (e.g. 'Ref No.: __________________') or draft indicators.\n"
+    "Recommendations must be qualitative or based strictly on calculated evidence -- never invent target percentages.\n"
+
+    "\nSPECIFICITY:\n"
+    "Every recommendation must name a SPECIFIC metric, entity, and its actual value from the data.\n"
+    "Forbidden generic phrases: 'improve efficiency', 'increase sales', 'optimize inventory', 'enhance performance'.\n"
+    "NEVER state a numeric KPI target, compliance rate, or forecast unless it is in the input data or a direct calculation.\n"
+
+    "\nCONSISTENCY:\n"
+    "PRESERVE all trend directions (up/down/stable) from data digests -- do not contradict them.\n"
+    "NEVER compare metrics with incompatible units or dimensions.\n"
+
+    "\nANALYTICAL DEPTH (for business/financial/operational reports):\n"
+    "For every key finding: Observed Metric -> Cross-File Evidence -> Causal Hypothesis -> Business Impact -> Recommendation.\n"
+    "Executive Summary must answer: (1) Most important finding? (2) Why? (3) One action leadership must take.\n"
+    "Identify the single largest gap/trend/risk across ALL datasets as the headline insight.\n"
+    "Do NOT treat each dataset as a mini-report -- connect findings causally across datasets.\n"
+    "Cross-dataset correlations must come from pre-computed cross-file intelligence, not invented relationships.\n"
 )
 
-_CORE_RULES = _BASE_CORE_RULES + _REPORT_CORE_RULES
-
+# ── Doc-type-specific spec rules ──────────────────────────────────────────────
 _REPORT_SPECIFIC_RULES = (
-    "\nREPORT-SPECIFIC FINDINGS & RIGOR -- CRITICAL:\n"
-    "- For every finding or key insight in the report, you MUST structure it using this format:\n"
-    "  * **Observation**: [Brief sentence describing what happened]\n"
-    "  * **Evidence**: [The exact numbers, values, or percentage growths from the data]\n"
-    "  * **Why it matters**: [The operational/business impact or risk]\n"
-    "  * **Recommended action**: [The specific qualitative next step]\n"
-    "- When stating any correlation or trend, you MUST explicitly output the Pearson correlation coefficient (r = X.XX) and confidence/strength label (Insight Strength: [Very High/High/Medium]) as given in the prompt context. Never speak vaguely about correlations without providing these exact values.\n"
-    "- These findings formatting rules apply ONLY to reports and analytical documents. Do NOT use them in training or SOP documents.\n"
+    "\nREPORT FINDINGS FORMAT:\n"
+    "Structure each finding as:\n"
+    "  * **Observation**: [what happened]\n"
+    "  * **Evidence**: [exact numbers/values]\n"
+    "  * **Why it matters**: [operational/business impact]\n"
+    "  * **Recommended action**: [specific qualitative next step]\n"
+    "When stating correlations, include the Pearson r value and Insight Strength label as given in context.\n"
+    "Include a Strategic Recommendations Table: "
+    "| Recommendation | Operational Rationale | Expected Outcome & Metrics | Priority | Owner | Timeline |\n"
 )
 
 _TRAINING_SPECIFIC_RULES = (
-    "\nTRAINING-SPECIFIC CONTENT RULES -- CRITICAL:\n"
-    "- Focus on instructional, educational, and onboarding content. Structure learning/onboarding paths with clear pre-onboarding, onboarding, and post-onboarding stages.\n"
-    "- Do NOT include analytical report sections, KPI dashboards, or report-specific findings layouts.\n"
-    "- NEVER use report-specific formatting labels like 'Observation', 'Evidence', 'Why it matters', 'Recommended action', 'Insight Strength', or 'Pearson correlation coefficient'. These report labels are strictly forbidden in training materials.\n"
+    "\nTRAINING CONTENT RULES:\n"
+    "Focus on instructional/educational/onboarding content with clear learning stages.\n"
+    "NEVER use report labels: 'Observation', 'Evidence', 'Why it matters', 'Recommended action', "
+    "'Insight Strength', 'Pearson correlation'.\n"
 )
 
 _SOP_SPECIFIC_RULES = (
-    "\nSOP / PROCEDURE MANUAL CONTENT RULES -- CRITICAL:\n"
-    "- Focus on standard operating procedures, roles, timelines, and sequential process steps.\n"
-    "- Do NOT include analytical report sections or report-specific findings layouts.\n"
-    "- NEVER use report-specific formatting labels like 'Observation', 'Evidence', 'Why it matters', 'Recommended action', 'Insight Strength', or 'Pearson correlation coefficient'. These report labels are strictly forbidden in SOPs.\n"
-)
- 
-# -- Grounding + analytical reasoning rules ------------------------------------
-_BASE_GROUNDING_RULES = (
-    "\nDOCUMENT-TYPE ADAPTATION -- CRITICAL:\n"
-    "- Apply analytical, profitability, competitive-position, revenue-impact, board-level, and strategic-action reasoning ONLY for business, financial, KPI, or operational reports.\n"
-    "- For educational, informational, policy, compliance, and SOP documents, focus on accurate explanation, responsibilities, procedures, requirements, and knowledge transfer.\n"
-    "- Do NOT force business-impact analysis onto documents whose purpose is instructional, procedural, or regulatory.\n"
-
-    "\nDATA GROUNDING -- CRITICAL:\n"
-    "- Before writing ANY section, scan ALL dataset summaries provided in the user\n"
-    "  message -- every file, every column, every stat block -- at least once.\n"
-    "- NEVER write that a topic is 'not included', 'not available', or 'not in the\n"
-    "  data' unless you have checked every dataset and found genuinely no related\n"
-    "  column or value. If even one related number exists, use it.\n"
-    "- Every dataset provided must be referenced by at least one specific statistic\n"
-    "  somewhere in the document.\n"
-
-    "\nNO HALLUCINATED REFERENCES or METRIC FABRICATION -- CRITICAL:\n"
-    "- The system should NEVER invent Reference Numbers, File Numbers, Employee Names, Budgets/Costs, specific Vendors, KPI targets, or Dates unless they are explicitly provided by the user or found in the uploaded files.\n"
-    "- If a reference number, date, or officer name is required by the document format but not provided, you MUST use standard professional blank underlines (e.g., 'Ref No.: __________________', 'Date: __________________', 'Officer Name: __________________') or draft indicators (e.g. '[Draft Reference]', '[Responsible Officer]'). Never invent realistic-looking placeholder data.\n"
-    "- Do NOT fabricate numbers, target KPIs, or names of external vendors. Use general terms (e.g., 'vendor', 'authorized supplier', 'target threshold') instead of fictional names/values.\n"
-    "- NEVER invent target percentages, numeric reductions, cost savings, or revenue growth figures in the Recommendations section (e.g., 'reduce inventory by 10%' or 'save INR 50 million') unless these specific numbers are explicitly derived from calculations or present in the source files. Recommendations must be qualitative (e.g., 'Review inventory policy for Diesel') or based strictly on calculated evidence.\n"
-
-    "\n-- SPECIFICITY -- no generic consulting filler -- CRITICAL:\n"
-    "- Every recommendation must name a SPECIFIC metric, entity, and its actual value, gap, or trend from the provided data. Generic or generic-industry filler is strictly forbidden.\n"
-    "- The following generic recommendations are STRICTLY FORBIDDEN: 'improve efficiency', 'increase sales', 'optimize inventory', 'enhance performance', 'strengthen compliance', 'maximize productivity', 'streamline operations'. Instead, you must write recommendations directly tied to data findings with specific metrics.\n"
-
-    "\nNO INVENTED METRICS, TARGETS, OR FORECASTS -- CRITICAL:\n"
-    "- NEVER state a specific numeric value, KPI target, compliance rate, variance, or forecast percentage unless it is either:\n"
-    "  (a) given directly in the input dataset summaries, OR\n"
-    "  (b) a simple arithmetic derivation of numbers that ARE in the dataset.\n"
-
-    "\nCONSISTENCY CHECK -- CRITICAL:\n"
-    "- Do not write generic findings unless they are TRUE for the specific numbers provided.\n"
-    "\nCOMPATIBLE METRIC COMPARISONS -- CRITICAL:\n"
-    "- NEVER compare or combine metrics with incompatible units or dimensions.\n"
-    "\nPRESERVE TREND SIGNALS -- CRITICAL:\n"
-    "- You MUST strictly preserve all trend directions (up, down, stable/flat) identified in the data digests and cross-file insights.\n"
+    "\nSOP CONTENT RULES:\n"
+    "Focus on standard operating procedures, roles, timelines, and sequential process steps.\n"
+    "NEVER use report labels: 'Observation', 'Evidence', 'Why it matters', 'Recommended action', 'Insight Strength'.\n"
 )
 
-_ANALYTICAL_RULES = (
-    "\n-- CONTENT PRIORITIZATION & ROADMAPS -- CRITICAL:\n"
-    "- Identify the 3-5 most important concepts or findings. Give them the most coverage.\n"
-    "- Minor details must NOT receive equal weight to critical findings.\n"
-    "- Compliance, safety, operational risk, and strategic items always rank above background.\n"
-    "- You MUST include a structured 'Implementation Roadmap' table at the end of the recommendations section with columns: | Action Item | Priority (Critical/High/Medium) | Responsible Function | Timeline (30 / 60 / 90 Days) | Target Success Metric |.\n"
-
-    "\n-- DEPTH OVER SUMMARY & ANALYSIS OVER DESCRIPTION -- CRITICAL:\n"
-    "- Do NOT merely list or describe facts. For every key finding: state it -> explain WHY it matters -> describe its operational/business impact -> state what action follows.\n"
-    "- Every major section must answer: What happened? Why? Why does it matter? What risks exist? What must be done?\n"
-
-    "\n-- STRATEGIC THINKING & SECTOR CONTEXT -- CRITICAL:\n"
-    "- Apply sector-specific business reasoning ONLY when the provided datasets or user request explicitly reference the relevant context.\n"
-    "- Every section must connect its findings to a business consequence relevant to the actual domain of the data.\n"
-
-    "\n-- ROOT-CAUSE ANALYSIS -- CRITICAL:\n"
-    "- Never stop at the symptom. For every problem identified, write one sentence naming the most likely underlying cause.\n"
-
-    "\n-- CROSS-DATASET CORRELATION -- CRITICAL:\n"
-    "- Actively look for relationships ACROSS datasets when meaningful.\n"
-    "- Only claim relationships when supported by direct evidence in the cross-file intelligence or data.\n"
-
-    "\n-- EXECUTIVE STORYTELLING -- CRITICAL:\n"
-    "- The document must have a narrative arc: situation -> complication -> insight -> recommendation.\n"
-    "- The Executive Summary must answer: (1) What is the single most important thing happening? (2) Why is it happening? (3) What is the one action leadership must take?\n"
-
-    "\n-- HEADLINE INSIGHT -- CRITICAL:\n"
-    "- Identify the single largest gap, trend, risk, or opportunity visible across ALL provided datasets.\n"
-    "- This must be the FIRST substantive statement in the Executive Summary.\n"
-
-    "\nINTEGRATED NARRATIVE -- CRITICAL:\n"
-    "- Do not treat each dataset as its own mini-report. Connect findings ACROSS datasets causally.\n"
-)
-
-_GROUNDING_RULES = _BASE_GROUNDING_RULES + _ANALYTICAL_RULES
-_SHARED_RULES = _CORE_RULES + _GROUNDING_RULES
- 
-# -- Data rules for NOINPUT prompts -------------------------------------------
-_NOINPUT_DATA_RULES = (
-    "\nDATA RULES FOR NO-FILE GENERATIONS -- CRITICAL:\n"
-    "- No source data file has been uploaded. Generate a structurally correct document framework using professional placeholders and guidance notes where information is unavailable. Do not create assumptions that appear to be facts.\n"
-    "- PRIORITY HIERARCHY FOR RESOLVING INFORMATION:\n"
-    "  1. Use uploaded data (if present)\n"
-    "  2. Use explicit prompt information\n"
-    "  3. Use placeholders (underlines, generic fallback text)\n"
-    "  4. Never invent facts\n"
-    "- Since NO source files are provided, you MUST adhere to the following rules to prevent fabrication/hallucination:\n"
-    "  * Prefer placeholders over examples when information is unavailable.\n"
-    "  * If a section normally requires factual information that is unavailable, you MUST keep the section to preserve document structure, but replace its contents with placeholders or specific text like: 'To be provided by the concerned department.'\n"
-    "  * Do NOT invent dates (e.g., use 'Effective Date: __________' or standard underlines 'Date: __________________').\n"
-    "  * Do NOT invent reference numbers or letter numbers (e.g., use 'Ref No.: __________________' or state 'vide letter/circular ref: __________________').\n"
-    "  * Do NOT invent historical correspondence or prior references (e.g., state 'No historical correspondence is referenced' or use blank underlines).\n"
-    "  * Do NOT invent committee members, names, or specific designations (e.g., write 'Committee composition shall be notified separately' or use underlines).\n"
-    "  * Do NOT invent specific products, equipment names, quantities, or cost estimates (like 'Warehouse Management System' or 'Automated Inventory Scanner'). Instead, write: 'Detailed technical specifications shall be finalized by the user department.'\n"
-    "  * Do NOT invent numerical KPI values, accuracy rates, fill rates, or turnover ratios. Do NOT use words like 'estimated 95%', 'hypothetical 95%', 'illustrative 95%', 'sample KPI', or 'assumed KPI'. Write instead: 'KPI metrics shall be determined based on operational requirements' or use blank underlines/descriptive text.\n"
-    "  * Do NOT invent costs, budgets, or specific figures (e.g., write 'Estimated Cost: Rs. __________________').\n"
-    "  * The issuing authority or organization must remain HPCL (or relevant HPCL departments like 'Information Systems Department, HPCL Corporate Office') and NOT invent external government ministries or departments (like Ministry of Electronics and Information Technology or Ministry of Petroleum and Natural Gas) unless explicitly provided in the prompt.\n"
-    "- Do NOT leave any realistic-looking fabricated numbers, dates, or names. Use professional underlines (__________________) or the specific phrases above instead.\n"
-    "- DISCLAIMER APPLICABILITY:\n"
-    "  * Include a prominent 'Assumptions & Disclaimer' section at the very beginning ONLY for: Business Reports (business_report), Policy Documents (policy_document), SOPs (sop), and Training Materials (training_material).\n"
-    "  * Do NOT generate or force an 'Assumptions & Disclaimer' section for: Office Memorandums (office_memorandum), Circulars (circular), Office Orders (office_order), File Notes (file_note), or Purchase Notes (purchase_note). Placeholders are sufficient for these document types.\n"
-)
- 
-# -- Multi-file rules ----------------------------------------------------------
+# ── Multi-file rules ──────────────────────────────────────────────────────────
 _MULTIFILE_RULES = (
-    "\nMULTI-FILE STRUCTURE RULES -- CRITICAL, always enforced:\n"
-    "1. Write ONE unified report covering ALL uploaded files together.\n"
-    "2. Use each section heading EXACTLY ONCE across the entire document.\n"
-    "3. Do NOT write a separate section block per file.\n"
-    "4. Do NOT use file names as section headings.\n"
-    "5. Compare and synthesize insights across files when meaningful.\n"
-    "6. The Recommendations section must be ONE consolidated section at the very end.\n"
-    "7. NEVER write 'The data can be visualized as follows:' as standalone content.\n"
-    "8. Do NOT add a 'Charts & Visualisations' section at the end.\n"
+    "\nMULTI-FILE RULES:\n"
+    "1. Write ONE unified report covering ALL files together.\n"
+    "2. Use each section heading EXACTLY ONCE.\n"
+    "3. Do NOT write a separate block per file or use file names as section headings.\n"
+    "4. Compare and synthesize insights across files.\n"
+    "5. ONE consolidated Recommendations section at the very end.\n"
+    "6. Do NOT add a 'Charts & Visualisations' section at the end.\n"
 )
- 
-# -- Cross-file intelligence rules ---------------------------------------------
+
+# ── Cross-file rules ──────────────────────────────────────────────────────────
 _CROSS_FILE_RULES = (
-    "\nCROSS-FILE INTELLIGENCE -- CRITICAL:\n"
-    "- A cross-file intelligence block is provided above the digests.\n"
-    "- You MUST explicitly address every CRITICAL and HIGH priority insight listed.\n"
-    "- Use the shared entity dimensions to compare values across files when relevant.\n"
-    "- The Executive Summary headline insight must come from the cross-file analysis when multiple files exist.\n"
-    "- Use connecting language (e.g. 'Taken alongside...', 'This is compounded by...') when supported by actual evidence.\n"
+    "\nCROSS-FILE INTELLIGENCE:\n"
+    "- Address every CRITICAL and HIGH priority insight listed.\n"
+    "- Use shared entity dimensions to compare values across files.\n"
+    "- Executive Summary headline must come from cross-file analysis when multiple files exist.\n"
+    "- Use connecting language (e.g. 'Taken alongside...', 'This is compounded by...') backed by evidence.\n"
 )
- 
-# -- Document-type-aware output instructions -----------------------------------
+
+# ── No-file data rules ────────────────────────────────────────────────────────
+_NOINPUT_DATA_RULES = (
+    "\nNO-FILE GENERATION RULES:\n"
+    "No source data has been uploaded. Generate a structurally correct document framework.\n"
+    "PRIORITY: (1) Uploaded data, (2) Explicit prompt info, (3) Placeholders, (4) Never invent facts.\n"
+    "- Use underlines (__________________) for all unknown dates, ref numbers, names, and costs.\n"
+    "- Do NOT invent: dates, reference numbers, committee names, KPI values, specific costs, or product names.\n"
+    "- Use 'Ref No.: __________________', 'Date: __________________', 'Estimated Cost: Rs. __________________'.\n"
+    "- NEVER use words like 'estimated 95%', 'hypothetical 95%', 'illustrative 95%'.\n"
+    "- Issuing authority must be HPCL (or relevant HPCL department) unless otherwise specified.\n"
+    "- Include '## Assumptions & Disclaimer' ONLY for: business_report, policy_document, sop, training_material.\n"
+    "  Disclaimer text: 'This document provides a template/framework. Organization-specific information "
+    "must be supplied by the concerned department.'\n"
+    "- Do NOT add Assumptions & Disclaimer to: office_memorandum, circular, office_order, file_note, purchase_note.\n"
+    "- For business_report with no files: write a structured template with placeholder fields, NOT smooth narrative prose.\n"
+    "- For purchase_note with no files: use underlines for all specs, quantities, costs, timelines.\n"
+    "- For placeholders with numeric ranges: write '______ to ______' not 'from to'.\n"
+)
+
+# ── Document-type output rules ────────────────────────────────────────────────
 _DOCTYPE_OUTPUT_RULES = {
- 
+
     "file_note": (
-        "\nDOCUMENT TYPE -- FILE NOTE (Official PSU/Government Format):\n"
-        "A File Note records deliberations, facts, and recommendations for decision-making.\n"
-        "Structure MUST follow this exact order:\n"
+        "\nDOCUMENT TYPE -- FILE NOTE:\n"
         "  # File Note: [Subject]\n"
         "  File No.: __________________\n"
         "  Department: __________________\n"
         "  Date: __________________\n"
-        "  Subject: [subject in brief]\n"
+        "  Subject: [subject]\n"
         "  ---\n"
         "  ## Background / Facts of the Case\n"
-        "    (Chronological facts, previous correspondence references, context)\n"
         "  ## Analysis / Deliberations\n"
-        "    (Point-wise examination of options, pros/cons, regulatory references)\n"
-        "  ## Financial Implications\n"
-        "    (Budget head, estimated cost, approval required -- omit section if not applicable)\n"
+        "  ## Financial Implications  (omit if not applicable)\n"
         "  ## Recommendation\n"
-        "    (Clear, specific recommendation -- one or two paragraphs)\n"
         "  ## Approval Sought\n"
-        "    (State exactly what approval/sanction is being sought)\n\n"
-        "  Submitted for Approval:\n\n"
-        "  Prepared by: __________________\n"
-        "  Designation: __________________\n"
-        "  Department: __________________\n\n"
-        "  Recommended by: __________________\n"
-        "  Designation: __________________\n"
-        "  Department: __________________\n\n"
-        "  Approved by (Competent Authority): __________________\n"
-        "  Designation: __________________\n"
-        "  Date: __________________\n"
-        "CRITICAL RULES:\n"
-        "- Use formal government language throughout.\n"
-        "- Number every paragraph inside each ## section sequentially (1., 2., 3. ...).\n"
-        "- Reference file numbers and prior correspondence with 'vide letter no.' format.\n"
-        "- End with a clear 'Approval Sought' statement -- never leave it open-ended.\n"
-        "- Do NOT use bullet points inside body sections -- use numbered paragraphs.\n"
-        "- Do NOT add sections not listed above.\n"
-        "- Do NOT generate [CHART: ...] markers in this document type.\n"
-        "- Use underlines (________________) for any field values not provided in context -- NEVER use brackets.\n"
-        "- FULL SIGNATORY CHAIN MANDATORY: Render Prepared by, Recommended by, and Approved by (Competent Authority) blocks completely.\n"
-        "- SPECIFIC SYSTEM RECOMMENDATIONS: Recommendations must be specific to the proposed system rather than generic.\n"
+        "  Submitted for Approval:\n"
+        "  Prepared by / Designation / Department: __________________\n"
+        "  Recommended by / Designation / Department: __________________\n"
+        "  Approved by (Competent Authority) / Designation / Date: __________________\n"
+        "CRITICAL RULES: Formal government language. Number every paragraph sequentially (1., 2., 3.).\n"
+        "Reference prior correspondence as 'vide letter no.'. NO bullet points in body -- use numbered paragraphs.\n"
+        "Do NOT add sections not listed. Do NOT generate [CHART:] markers. Use underlines for unknown fields.\n"
+        "Full signatory chain is MANDATORY.\n"
     ),
- 
+
     "office_memorandum": (
-        "\nDOCUMENT TYPE -- OFFICE MEMORANDUM / O.M. (Official PSU/Government Format):\n"
-        "An Office Memorandum is used for inter-departmental official communication.\n"
-        "Structure MUST follow this exact order:\n"
+        "\nDOCUMENT TYPE -- OFFICE MEMORANDUM (O.M.):\n"
         "  # Office Memorandum\n"
         "  No.: __________________          Date: __________________\n"
         "  From: [Issuing Office / Department]\n"
@@ -293,234 +194,117 @@ _DOCTYPE_OUTPUT_RULES = {
         "  Subject: [Subject]\n"
         "  ---\n"
         "  ## Body\n"
-        "    (Open with 'The undersigned is directed to...' or reference to prior O.M.)\n"
-        "    (Content in numbered paragraphs -- directive/notification content ONLY)\n"
-        "    (If files were uploaded, summarise the KEY DIRECTIVE or FINDING in plain\n"
-        "     language suitable for an inter-departmental memo -- NOT raw statistics\n"
-        "     or correlation coefficients. Convert data findings into actionable directives.)\n"
-        "  ## Action Required\n"
-        "    (What the recipient must do and by when -- omit if not applicable)\n\n"
+        "    (Open with 'The undersigned is directed to...' -- numbered paragraphs -- directive content ONLY)\n"
+        "    (If data files uploaded: convert findings to actionable directives -- NO raw statistics or column names)\n"
+        "  ## Action Required  (omit if not applicable)\n"
         "  Sd/-\n"
-        "  __________________\n"
-        "  Name: __________________\n"
-        "  Designation: __________________\n"
-        "  Department / Division: __________________\n"
-        "CRITICAL RULES:\n"
-        "- Open with 'The undersigned is directed to...' -- NEVER use first-person 'I'.\n"
-        "- Use numbered paragraphs throughout the Body section.\n"
-        "- Body content must be DIRECTIVE and INFORMATIONAL -- not analytical reports.\n"
-        "- If data files are provided, convert findings into actionable memo language.\n"
-        "  DO NOT paste raw statistics, correlation coefficients, or dataset column names.\n"
-        "  INSTEAD write: 'The sales data for the period indicates a significant upward trend\n"
-        "  in the Northern region, requiring immediate attention from regional managers.'\n"
-        "- Do NOT add Executive Summary, KPI Dashboard, or analytical report sections.\n"
-        "- Do NOT generate [CHART: ...] markers in this document type.\n"
-        "- Use underlines (________________) for any field values not provided in context.\n"
+        "  Name / Designation / Department: __________________\n"
+        "CRITICAL RULES: Open with 'The undersigned is directed to...' -- NEVER first-person 'I'.\n"
+        "Numbered paragraphs throughout. Body is DIRECTIVE/INFORMATIONAL -- not an analytical report.\n"
+        "Do NOT add Executive Summary or KPI sections. Do NOT generate [CHART:] markers. Use underlines for unknowns.\n"
     ),
- 
+
     "office_notice": (
-        "\nDOCUMENT TYPE -- OFFICE NOTICE (Official PSU/Government Format):\n"
-        "An Office Notice communicates information or directives to a group of recipients.\n"
-        "Structure MUST follow this exact order:\n"
+        "\nDOCUMENT TYPE -- OFFICE NOTICE:\n"
         "  # Office Notice\n"
         "  Notice No.: __________________             Date: __________________\n"
         "  Department: __________________\n"
         "  Subject: [subject]\n"
         "  ---\n"
         "  ## Notice Body\n"
-        "    (Open with 'It is hereby notified that...' or 'All concerned are informed that...')\n"
-        "    (Key information in clear numbered points)\n"
+        "    (Open with 'It is hereby notified that...' -- numbered points)\n"
         "  ## Compliance / Action Required\n"
-        "    (What recipients must do, by when)\n\n"
-        "  By Order / For [Issuing Authority]\n\n"
-        "  Signature: __________________\n"
-        "  Name: __________________\n"
-        "  Designation: __________________\n"
-        "  Department: __________________\n\n"
-        "  Distribution:\n"
-        "  1. All Concerned Departments\n"
-        "  2. Notice Board\n"
-        "  3. Office Copy\n"
-        "CRITICAL RULES:\n"
-        "- Begin with 'It is hereby notified that...' or 'All concerned are informed that...'\n"
-        "- Use numbered points inside sections.\n"
-        "- State deadline and responsible party explicitly in the Compliance section.\n"
-        "- Do NOT use analytical or report-style language.\n"
-        "- Do NOT generate [CHART: ...] markers in this document type.\n"
-        "- Use underlines (________________) for any field values not provided in context.\n"
+        "  By Order / For [Issuing Authority]\n"
+        "  Signature / Name / Designation / Department: __________________\n"
+        "  Distribution: 1. All Concerned Departments  2. Notice Board  3. Office Copy\n"
+        "CRITICAL RULES: Numbered points in body. State deadline and responsible party in Compliance.\n"
+        "No analytical language. Do NOT generate [CHART:] markers. Use underlines for unknowns.\n"
     ),
- 
+
     "circular": (
-        "\nDOCUMENT TYPE -- OFFICE CIRCULAR (Official PSU/Government Format):\n"
-        "A Circular is a policy or procedure communication issued to a wide audience.\n"
-        "Structure MUST follow this exact order:\n"
+        "\nDOCUMENT TYPE -- OFFICE CIRCULAR:\n"
         "  # Circular No. __________________\n"
         "  Date: __________________\n"
         "  Subject: [subject]\n"
         "  ---\n"
         "  ## Preamble / Background\n"
-        "    (Why this circular is issued; reference to policy/authority under which issued)\n"
-        "  ## Scope & Applicability\n"
-        "    (Who this circular applies to)\n"
-        "  ## Instructions / Directives\n"
-        "    (Numbered list of specific instructions -- each instruction on its own numbered line)\n"
+        "  ## Scope & Applicability  (must name employee categories: permanent, contractual, temporary)\n"
+        "  ## Instructions / Directives  (MINIMUM 6 numbered directives)\n"
         "  ## Effective Date\n"
-        "    (State the date from which this circular is effective)\n"
-        "  ## Non-Compliance\n"
-        "    (Consequences of non-compliance -- omit if not applicable)\n\n"
-        "  By Order of [Authority]\n\n"
-        "  Signature: __________________\n"
-        "  Name: __________________\n"
-        "  Designation: __________________\n"
-        "  Department: __________________\n\n"
-        "  Distribution:\n"
-        "  1. All Departments / Sections\n"
-        "  2. IT Division (for hosting on Portal)\n"
-        "  3. Office Copy\n"
-        "CRITICAL RULES:\n"
-        "- Use numbered instructions -- NEVER prose paragraphs for directives.\n"
-        "- State the effective date explicitly.\n"
-        "- Reference the authority/policy under which this circular is issued.\n"
-        "- The Preamble must reference a specific regulation, ministry guideline, or HPCL policy.\n"
-        "- The Instructions section must have MINIMUM 6 specific, actionable numbered directives.\n"
-        "- Do NOT generate [CHART: ...] markers in this document type.\n"
-        "- Use underlines (________________) for any field values not provided in context.\n"
-        "- SCOPE section must explicitly name employee categories (permanent, contractual, temporary).\n"
+        "  ## Non-Compliance  (omit if not applicable)\n"
+        "  By Order of [Authority]\n"
+        "  Signature / Name / Designation / Department: __________________\n"
+        "  Distribution: 1. All Departments  2. IT Division (for portal hosting)  3. Office Copy\n"
+        "CRITICAL RULES: Numbered instructions -- NO prose paragraphs for directives.\n"
+        "Preamble MUST reference a specific regulation or HPCL policy. Effective date must be stated.\n"
+        "Do NOT generate [CHART:] markers. Use underlines for unknowns.\n"
     ),
- 
+
     "purchase_note": (
-        "\nDOCUMENT TYPE -- PURCHASE / PROCUREMENT NOTE (Official PSU/Government Format):\n"
-        "A Purchase Note is a JUSTIFICATION and DECISION-SUPPORT document for procurement approval.\n"
-        "It is NOT a payment form, billing certificate, or transaction record.\n"
-        "The purpose is to present a thorough operational case for why the procurement is necessary.\n"
-        "\n"
-        "Structure MUST follow this exact order:\n"
-        "\n"
-        "  # Purchase Note: [Item or Service Being Procured]\n"
+        "\nDOCUMENT TYPE -- PURCHASE / PROCUREMENT NOTE:\n"
+        "A justification and decision-support document for procurement approval. NOT a payment form.\n"
+        "  # Purchase Note: [Item or Service]\n"
         "  Note No.: __________________          Date: __________________\n"
         "  Department: __________________\n"
-        "  Subject: Purchase of [item/service description]\n"
+        "  Subject: Purchase of [description]\n"
         "  ---\n"
-        "\n"
         "  ## 1. Purpose and Operational Requirement\n"
-        "  Write 3-5 numbered paragraphs explaining:\n"
-        "  - What exactly is being procured and why it is needed operationally\n"
-        "  - What specific operational gap, problem, or business need drives this requirement\n"
-        "  - Which department, team, or process will use it and how\n"
-        "  - What the current situation is without this procurement\n"
-        "  - How it aligns with HPCL's operational or strategic objectives\n"
-        "\n"
+        "    3-5 numbered paragraphs: what is procured and why; operational gap it fills;\n"
+        "    which dept/process uses it; current situation without it; alignment with HPCL objectives.\n"
         "  ## 2. Specification of Items / Services\n"
-        "  Provide a markdown table:\n"
-        "  | S.No | Item / Service Description | Technical Specification | Quantity | Est. Unit Cost (Rs.) | Total Est. Cost (Rs.) |\n"
-        "  |------|---------------------------|------------------------|----------|---------------------|----------------------|\n"
-        "  For unknown values, write: Rs. __________________ or Qty: __________________\n"
-        "\n"
+        "    | S.No | Item / Service Description | Technical Specification | Quantity | Est. Unit Cost (Rs.) | Total Est. Cost (Rs.) |\n"
+        "    Use 'Rs. __________________' for unknown costs.\n"
         "  ## 3. Operational Justification and Risk of Non-Procurement\n"
-        "  Write 3-5 numbered paragraphs covering:\n"
-        "  - Why these specific technical specifications are required\n"
-        "  - What alternatives were considered and why they were ruled out\n"
-        "  - What specific operational, safety, compliance, or financial risks arise if NOT procured\n"
-        "  - What the consequence to service delivery or production continuity would be\n"
-        "\n"
+        "    3-5 numbered paragraphs: why these specs; alternatives considered; specific risks if not procured.\n"
         "  ## 4. Budget Provision and Financial Considerations\n"
-        "  Write 2-3 numbered paragraphs covering:\n"
-        "  - The budget head under which this expenditure falls\n"
-        "  - Whether budget has been sanctioned or is being sought\n"
-        "  - The estimated total cost\n"
-        "  Use: Budget Head: __________________ or Estimated Cost: Rs. __________________ for unknowns.\n"
-        "\n"
+        "    2-3 numbered paragraphs: budget head; sanctioned/sought status; estimated total cost.\n"
         "  ## 5. Procurement Method and Vendor Strategy\n"
-        "  Write 2-3 numbered paragraphs covering:\n"
-        "  - The recommended procurement method (Open Tender / Limited Tender / Single Source / Rate Contract / GeM)\n"
-        "  - The operational rationale for choosing this method\n"
-        "  - Any empanelled vendors or prior procurement history\n"
-        "  - Compliance with GFR 2017 / HPCL procurement guidelines\n"
-        "\n"
+        "    2-3 numbered paragraphs: method (Open Tender/Limited Tender/Single Source/GeM/Rate Contract);\n"
+        "    rationale; GFR 2017 / HPCL procurement guideline reference.\n"
         "  ## 6. Proposed Delivery Schedule\n"
-        "  Write 1-2 numbered paragraphs covering:\n"
-        "  - Expected timeline for delivery, commissioning, or completion\n"
-        "  - Any critical dependencies or go-live milestones\n"
-        "\n"
+        "    1-2 numbered paragraphs: expected timeline; milestones.\n"
         "  ## 7. Recommendation and Approval Sought\n"
-        "  Write a clear, formal recommendation paragraph followed by the exact sanction being sought.\n\n"
-        "  Prepared by: __________________\n"
-        "  Designation: __________________\n"
-        "  Department: __________________\n\n"
-        "  Recommended by: __________________\n"
-        "  Designation: __________________\n"
-        "  Department: __________________\n\n"
-        "  Approved by (Competent Authority): __________________\n"
-        "  Designation: __________________\n"
-        "  Date: __________________\n"
-        "\n"
-        "CRITICAL RULES:\n"
-        "- This document MUST read as a professional procurement justification written by a government officer.\n"
-        "- Section 1 and Section 3 MUST be substantive (3-5 numbered paragraphs each) -- NEVER one-liners.\n"
-        "- Section 2 MUST be a properly formatted markdown table with all 6 columns.\n"
-        "- Section 5 MUST name the recommended procurement method with GFR 2017 reference.\n"
-        "- Section 7 MUST state the exact rupee amount or Rs. __________________ and end with full signatory chain.\n"
-        "- Use underlines (__________________) for unknowns -- NEVER brackets like [TBD] or [Cost].\n"
-        "- Use numbered paragraphs (1., 2., 3.) inside every section -- NEVER bullet points.\n"
-        "- Do NOT generate [CHART: ...] markers in this document type.\n"
-        "- Do NOT copy these instructions into the output. Write actual professional content.\n"
-        "- The output must be a COMPLETED, FINALIZED document -- not a skeleton or template.\n"
-        "- SUBJECT-SPECIFIC: Operational justifications and technical specs must be specific to the\n"
-        "  item/service requested (e.g., processor speed and RAM if laptops; throughput and uptime\n"
-        "  SLA if software platform) -- never generic business benefits.\n"
-        "- BUDGET: Section 4 must reference a specific budget head (e.g., 'Capital Expenditure --\n"
-        "  IT Infrastructure') or use __________________ -- never invent specific rupee figures.\n"
+        "    Formal recommendation paragraph + exact sanction being sought.\n"
+        "    Prepared by / Recommended by / Approved by (Competent Authority): __________________\n"
+        "CRITICAL RULES: Sections 1 and 3 MUST have 3-5 numbered paragraphs each -- never one-liners.\n"
+        "Section 2 MUST be a properly formatted markdown table with all 6 columns.\n"
+        "Section 5 MUST name the procurement method with GFR 2017 reference.\n"
+        "Use numbered paragraphs (1., 2., 3.) in every section -- NO bullet points.\n"
+        "Use underlines (__________________) for unknowns -- NEVER brackets like [TBD].\n"
+        "Do NOT generate [CHART:] markers. Full signatory chain MANDATORY.\n"
+        "Specs and justifications must be SPECIFIC to the item requested -- not generic business benefits.\n"
     ),
- 
+
     "office_order": (
-        "\nDOCUMENT TYPE -- OFFICE ORDER (Official PSU/Government Format):\n"
-        "An Office Order conveys official decisions, transfers, promotions, or directives.\n"
-        "Structure MUST follow this exact order:\n"
+        "\nDOCUMENT TYPE -- OFFICE ORDER:\n"
         "  # Office Order No. __________________\n"
         "  Date: __________________\n"
         "  Subject: [subject]\n"
         "  ---\n"
         "  ## Order\n"
-        "    (Open with 'It is ordered that...' or 'Sanction is hereby accorded to...')\n"
-        "    (Numbered paragraphs containing the specific directive)\n"
+        "    (Open with 'It is ordered that...' -- MINIMUM 3 numbered paragraphs)\n"
         "  ## Effective Date\n"
-        "    (State when this order comes into effect)\n"
-        "  ## Compliance\n"
-        "    (Who must comply and any reporting requirement)\n\n"
-        "  By Order of Competent Authority\n\n"
-        "  Signature: __________________\n"
-        "  Name: __________________\n"
-        "  Designation: __________________\n"
-        "  Department: __________________\n\n"
-        "  Copy to:\n"
-        "  1. All Concerned Officers\n"
-        "  2. HR Division / Personal File\n"
-        "  3. Office Copy\n"
-        "CRITICAL RULES:\n"
-        "- Open with 'It is ordered that...' or 'Sanction is hereby accorded to...'\n"
-        "- Number all paragraphs inside ## Order sequentially.\n"
-        "- The Order section MUST have at least 3 substantive numbered paragraphs.\n"
-        "- State effective date and compliance requirements explicitly.\n"
-        "- The Compliance section must name the responsible officer/department and reporting frequency.\n"
-        "- Do NOT generate [CHART: ...] markers in this document type.\n"
-        "- Use underlines (________________) for any field values not provided in context.\n"
+        "  ## Compliance  (name responsible officer/dept and reporting frequency)\n"
+        "  By Order of Competent Authority\n"
+        "  Signature / Name / Designation / Department: __________________\n"
+        "  Copy to: 1. All Concerned Officers  2. HR Division / Personal File  3. Office Copy\n"
+        "CRITICAL RULES: Open with 'It is ordered that...' -- numbered paragraphs throughout.\n"
+        "Effective date and compliance requirements must be explicit.\n"
+        "Do NOT generate [CHART:] markers. Use underlines for unknowns.\n"
     ),
- 
+
     "training_material": (
-        "\nDOCUMENT TYPE -- EDUCATIONAL / TRAINING MATERIAL:\n"
-        "Generate the document title directly from the source material. Never invent generic titles.\n"
-        "Structure the output as a proper training document:\n"
+        "\nDOCUMENT TYPE -- TRAINING MATERIAL:\n"
         "  ## Learning Objectives (4-6 measurable objectives)\n"
         "  ## [Topic Sections -- one per major concept]\n"
         "  ## Assessment (5 questions with answers based only on source content)\n"
         "  ## Glossary (key terms with definitions)\n"
         "  ## Key Takeaways\n"
-        "Do NOT create fictional HPCL scenarios, case studies, or KPI dashboards.\n"
+        "Do NOT create fictional HPCL scenarios or KPI dashboards.\n"
     ),
- 
+
     "policy_document": (
         "\nDOCUMENT TYPE -- POLICY / COMPLIANCE DOCUMENT:\n"
-        "Structure the output as:\n"
         "  ## Purpose & Scope\n"
         "  ## Applicability\n"
         "  ## Key Requirements\n"
@@ -528,43 +312,33 @@ _DOCTYPE_OUTPUT_RULES = {
         "  ## Procedures / Implementation Steps\n"
         "  ## Non-Compliance Consequences\n"
         "  ## Compliance Checklist\n"
-        "For every requirement: state WHAT must be done, WHO is responsible, WHEN, and consequences.\n"
+        "For every requirement: state WHAT, WHO is responsible, WHEN, and consequences.\n"
     ),
- 
+
     "sop": (
         "\nDOCUMENT TYPE -- STANDARD OPERATING PROCEDURE (SOP):\n"
-        "Structure the output as:\n"
         "  ## Purpose & Scope\n"
         "  ## Prerequisites\n"
-        "  ## Procedure (numbered steps; each: Action -> Role -> Tool -> Safety Note)\n"
+        "  ## Procedure (numbered steps: Action -> Role -> Tool -> Safety Note)\n"
         "  ## Critical Control Points\n"
         "  ## Quality Checks\n"
         "  ## Safety Warnings\n"
         "  ## Troubleshooting (symptom -> cause -> corrective action)\n"
         "  ## Performance Metrics\n"
     ),
- 
+
     "business_report": (
         "\nDOCUMENT TYPE -- BUSINESS / ANALYTICAL REPORT:\n"
-        "Structure the output as:\n"
         "  ## Executive Summary  (headline insight -> root cause -> 90-day action)\n"
-        "  ## KPI Dashboard  (table: Metric | Value | Trend)\n"
-        "     Note: If targets are explicitly available in the data, you can use: Metric | Value | Target | Variance | Trend. Otherwise, DO NOT include Target and Variance columns; use only Metric | Value | Trend.\n"
-        "  ## Key Findings\n"
-        "     For each finding, you MUST follow this exact consultant-grade format:\n"
-        "     * **Observation**: [What happened]\n"
-        "     * **Evidence**: [The exact numbers, values, and comparisons from the data]\n"
-        "     * **Why it matters**: [The operational or business impact]\n"
-        "     * **Recommended action**: [The specific, qualitative action to take next]\n"
+        "  ## KPI Dashboard  (table: Metric | Value | Trend; add Target/Variance only if targets are in the data)\n"
+        "  ## Key Findings  (each finding: Observation / Evidence / Why it matters / Recommended action)\n"
         "  ## [Topic-specific analysis sections]\n"
         "  ## Risk Assessment  (table: Risk | Likelihood | Impact | Mitigation)\n"
-        "  ## Strategic Recommendations\n"
-        "     Format: Recommendation | Operational Rationale | Expected Outcome & Metrics\n"
+        "  ## Strategic Recommendations  (table: Recommendation | Operational Rationale | Expected Outcome & Metrics)\n"
     ),
- 
+
     "financial_report": (
         "\nDOCUMENT TYPE -- FINANCIAL REPORT:\n"
-        "Structure the output as:\n"
         "  ## Executive Summary\n"
         "  ## Financial Snapshot\n"
         "  ## Variance Analysis and Business Impact\n"
@@ -573,185 +347,149 @@ _DOCTYPE_OUTPUT_RULES = {
         "  ## Forward Outlook\n"
         "  ## Priority Actions\n"
     ),
- 
+
     "operational": (
         "\nDOCUMENT TYPE -- OPERATIONAL STATUS REPORT:\n"
-        "Structure the output as:\n"
         "  ## Operational Summary\n"
         "  ## Category-wise Breakdown\n"
         "  ## Anomalies & Flags\n"
         "  ## Operational Recommendations\n"
         "  ## Performance Metrics\n"
     ),
- 
+
     "informational": (
         "\nDOCUMENT TYPE -- INFORMATIONAL DOCUMENT:\n"
-        "Structure the output with:\n"
         "  ## Introduction\n"
-        "  ## [Topic sections derived from the content]\n"
+        "  ## [Topic sections derived from content]\n"
         "  ## Summary\n"
         "Present information accurately. Do NOT invent analysis, KPIs, or recommendations.\n"
     ),
- 
+
     "educational": (
         "\nDOCUMENT TYPE -- EDUCATIONAL CONTENT:\n"
-        "Write a clear educational document covering the topics in the source material.\n"
         "Structure: Introduction -> topic-by-topic sections -> Key Takeaways.\n"
         "Do NOT reframe as a KPI dashboard or HR analytics report.\n"
     ),
- 
+
     "policy": (
         "\nDOCUMENT TYPE -- POLICY DOCUMENT:\n"
-        "Write a structured policy document: Purpose & Scope -> Requirements -> Procedures\n"
-        "-> Responsibilities -> Compliance. Present faithfully -- no invented analysis.\n"
+        "Structure: Purpose & Scope -> Requirements -> Procedures -> Responsibilities -> Compliance.\n"
+        "Present faithfully -- no invented analysis.\n"
     ),
 }
- 
-# -- System prompts ------------------------------------------------------------
+
+# ── System prompts ────────────────────────────────────────────────────────────
 SYSTEM_PROMPTS = {
- 
+
     "docx": (
         "You are an expert enterprise document generator. Customize branding and terminology "
-        "to match the organization and domain of the input files or user request. If the context is "
-        "explicitly HPCL (Hindustan Petroleum Corporation Limited), use HPCL branding and downstream "
-        "petroleum paradigms; otherwise, remain domain-agnostic and use the terminology of the file's industry. "
-        "Generate detailed, professional reports in markdown format.\n\n"
+        "to match the organization and domain of the input files or user request. "
+        "If the context is explicitly HPCL, use HPCL branding; otherwise remain domain-agnostic.\n\n"
         "FORMATTING:\n"
         "- Use ## for section headings, ### for subsections.\n"
-        "- Use bullet points (- ) for lists.\n"
-        "- Use markdown tables where structured data fits.\n"
-        "- Write for a corporate audience -- formal tone, no casual language.\n"
-        "- Minimum 6 sections with meaningful depth per section.\n"
-        "- Each section must have at least 3 sentences of real analysis.\n"
+        "- Use bullet points (- ) for lists and markdown tables for structured data.\n"
+        "- Formal corporate tone. Minimum 6 sections with at least 3 sentences of real analysis each.\n"
     ),
- 
+
     "pdf": (
-        "You are an expert enterprise PDF report generator. Customize branding and terminology "
-        "to match the organization and domain of the input files or user request. "
-        "Generate structured, professional markdown content with clear headings.\n\n"
+        "You are an expert enterprise PDF report generator. Customize branding to match "
+        "the organization and domain of the input files or user request.\n\n"
         "FORMATTING:\n"
         "- Use ## for major sections, ### for subsections.\n"
-        "- Write for a corporate audience -- formal tone, no casual language.\n"
-        "- Each section must have at least 3 sentences of real analysis.\n"
+        "- Formal corporate tone. Each section must have at least 3 sentences of real analysis.\n"
     ),
- 
+
     "pptx": (
         "You are an expert PowerPoint presentation designer. Enforce strict slide-ready discipline:\n"
-        "1. SLIDE STRUCTURE: Use ## for each slide heading. Each ## heading becomes exactly one slide. Do not group multiple slides under one ## heading.\n"
-        "2. BULLETS LIMIT: Provide exactly 3 to 5 bullet points per slide using the '-' syntax.\n"
-        "3. STRICT LENGTH LIMIT: Each bullet point must be a single, direct sentence, containing a maximum of 18 words. Avoid sub-bullets or multiple sentences in a single bullet.\n"
-        "4. ONE CHART PER SLIDE: If the slide contains or refers to numerical data, embed exactly one chart marker in the format: [CHART: <Title of Chart>] immediately after the ## heading or bullet list. Never write more than one chart marker per slide.\n"
-        "5. SPEAKER NOTES MANDATORY: For every single slide, you MUST write detailed speaker notes. Format them as `Speaker Notes: <detailed paragraph describing the slide contents, statistics, and business implications in depth>` on a new line after the slide bullets.\n"
-        "6. NO WRAPPER SLIDES: Never write ## Title Page, ## Acknowledgement, or ## Thank You slides.\n"
-        "7. SLIDE COUNT: Ensure the presentation contains between 10 and 14 slides (## headings) in total, each covering a distinct analytical topic with no overlap."
+        "1. SLIDE STRUCTURE: Use ## for each slide heading. Each ## becomes exactly one slide.\n"
+        "2. BULLETS: Exactly 3-5 bullet points per slide using '-' syntax.\n"
+        "3. LENGTH: Each bullet = one direct sentence, max 18 words. No sub-bullets.\n"
+        "4. CHARTS: One chart marker per slide where numeric data exists.\n"
+        "5. SPEAKER NOTES: Every slide MUST have: 'Speaker Notes: <detailed paragraph>'\n"
+        "6. NO WRAPPER SLIDES: Never write ## Title Page, ## Acknowledgement, or ## Thank You.\n"
+        "7. SLIDE COUNT: 10-14 slides total, each covering a distinct topic.\n"
     ),
- 
+
     "official_doc": (
-        "You are an expert in drafting official government and PSU (Public Sector Undertaking) "
-        "documents. Customize the organization name in headers, templates, and signatory blocks "
-        "to match the domain of the input files or user request. If the context is explicitly HPCL "
-        "(Hindustan Petroleum Corporation Limited), draft the document for HPCL.\n\n"
- 
-        "CORE IDENTITY OF THIS TASK:\n"
-        "You are acting as a senior officer drafting an official document. "
-        "Your output must read as a real, complete, professionally written government document -- "
-        "not a template, not a form, not a skeleton with blanks everywhere.\n\n"
- 
-        "CONTENT GENERATION RULES -- MANDATORY:\n"
-        "1. Generate SUBSTANTIVE CONTENT for every section. Do not produce one-line sections.\n"
-        "2. For Purchase Notes: Sections 1 and 3 must each have 3-5 numbered paragraphs of real\n"
-        "   operational reasoning based on the context given.\n"
-        "3. For File Notes: Background and Analysis sections must have 3+ numbered paragraphs.\n"
-        "4. For Circulars and Notices: Instructions must be a numbered list of minimum 6 specific directives.\n"
-        "5. Derive content from whatever context is given in the prompt (subject matter, department,\n"
-        "   type of item/policy). A request for 'purchase note for laptops' should produce real\n"
-        "   operational justification about why laptops are needed -- not blank lines.\n"
-        "6. FULL SIGNATORY CHAIN MANDATORY: For all official document types, you MUST fully render\n"
-        "   the signature workflow block. Do NOT omit Prepared by, Recommended by, or Approved by.\n"
-        "7. SPECIFIC CONTENT: Ensure all content is highly specific to the subject matter,\n"
-        "   not generic consulting phrases.\n\n"
-  
-        "ANTI-HALLUCINATION RULES -- FOR METADATA FIELDS ONLY:\n"
-        "1. NEVER write real or fictional person names. Use blank underlines: __________________\n"
-        "2. NEVER invent specific reference numbers. Use: Reference No.: __________________\n"
-        "3. NEVER write specific dates unless given in the prompt. Use: Date: __________________\n"
-        "4. NEVER invent specific financial figures. Use: Rs. __________________ for unknown costs.\n\n"
- 
-        "ADAPTIVE CONTENT RULES:\n"
-        "1. USE PROVIDED INFORMATION FIRST: Use any specific details from the prompt exactly.\n"
-        "2. FILL IN LOGICAL CONTENT: For operational sections, generate realistic, professional\n"
-        "   organization-appropriate content based on what has been asked for.\n"
-        "3. PROFESSIONAL FALLBACKS: Use professional generic language rather than brackets:\n"
-        "   - 'standard hardware specifications' instead of '[specs]'\n"
-        "   - 'the approved budget allocation' instead of '[budget]'\n\n"
- 
-        "FORMATTING RULES:\n"
+        "You are an expert in drafting official government and PSU documents. "
+        "If the context is explicitly HPCL, draft for HPCL; otherwise match the domain of the request.\n\n"
+        "IDENTITY: You are acting as a senior officer drafting an official document. "
+        "Your output must read as a real, complete, professionally written government document.\n\n"
+        "CONTENT RULES:\n"
+        "1. Generate SUBSTANTIVE CONTENT for every section -- no one-line sections.\n"
+        "2. Purchase Notes S1 and S3: each needs 3-5 numbered paragraphs of real operational reasoning.\n"
+        "3. File Notes: Background and Analysis sections need 3+ numbered paragraphs.\n"
+        "4. Circulars/Notices: Instructions must be a numbered list of minimum 6 specific directives.\n"
+        "5. Derive content from context given. 'Purchase note for laptops' -> real operational justification.\n"
+        "6. FULL SIGNATORY CHAIN MANDATORY for all official document types.\n\n"
+        "ANTI-HALLUCINATION (metadata fields only):\n"
+        "- NEVER write real or fictional person names. Use: __________________\n"
+        "- NEVER invent reference numbers. Use: Reference No.: __________________\n"
+        "- NEVER write specific dates unless given. Use: Date: __________________\n"
+        "- NEVER invent financial figures. Use: Rs. __________________\n\n"
+        "FORMATTING:\n"
         "- Follow the EXACT format structure provided in the user prompt.\n"
-        "- Use formal, impersonal government language throughout.\n"
-        "- NEVER use first-person singular ('I'). Use 'the undersigned', 'it is submitted'.\n"
-        "- Number all paragraphs within body sections sequentially (1., 2., 3. ...).\n"
-        "- Do NOT add sections not specified in the format.\n"
-        "- Do NOT generate charts, KPI dashboards, or analytical summaries.\n"
-        "- Start your response with a # heading containing the document type and subject.\n\n"
+        "- Formal, impersonal government language. NEVER use first-person 'I'. Use 'the undersigned'.\n"
+        "- Number all paragraphs within body sections sequentially (1., 2., 3.).\n"
+        "- Do NOT add sections not specified. Do NOT generate charts or KPI dashboards.\n"
+        "- Start with a # heading containing the document type and subject.\n"
     ),
- 
+
     "docx_noinput": (
-        "You are an expert enterprise document writer. "
-        "The user wants a document created from scratch with no source data.\n\n"
+        "You are an expert enterprise document writer creating a document from scratch with no source data.\n\n"
         "FORMATTING:\n"
-        "- If required by the Disclaimer Applicability rules, the first section MUST be ## Assumptions & Disclaimer.\n"
-        "- Use ## for section headings, ### for subsections.\n"
-        "- Be specific and realistic -- no generic filler content.\n"
-        "- Minimum 6 sections, each with meaningful, domain-appropriate content.\n"
-        "- Do NOT generate [CHART: ...] markers -- no data to chart.\n"
+        "- If required by disclaimer rules, first section MUST be ## Assumptions & Disclaimer.\n"
+        "- Use ## for headings, ### for subsections. Minimum 6 sections with meaningful content.\n"
+        "- Do NOT generate [CHART:] markers -- no data to chart.\n"
     ),
- 
+
     "pdf_noinput": (
-        "You are an expert enterprise PDF writer. "
-        "The user wants a PDF document from scratch with no source data.\n\n"
+        "You are an expert enterprise PDF writer creating a document from scratch with no source data.\n\n"
         "FORMATTING:\n"
-        "- If required by the Disclaimer Applicability rules, the first section MUST be ## Assumptions & Disclaimer.\n"
-        "- Use ## for major sections, ### for subsections.\n"
-        "- Be specific and realistic -- no generic filler content.\n"
-        "- Minimum 6 sections with meaningful depth.\n"
-        "- Do NOT generate [CHART: ...] markers -- no data to chart.\n"
+        "- If required by disclaimer rules, first section MUST be ## Assumptions & Disclaimer.\n"
+        "- Use ## for major sections, ### for subsections. Minimum 6 sections.\n"
+        "- Do NOT generate [CHART:] markers -- no data to chart.\n"
     ),
- 
+
     "pptx_noinput": (
-        "You are an expert PowerPoint presentation designer. Enforce strict slide-ready discipline:\n"
-        "1. SLIDE STRUCTURE: Use ## for each slide heading. Each ## heading becomes exactly one slide.\n"
-        "2. BULLETS LIMIT: Provide exactly 3 to 5 bullet points per slide using the '-' syntax.\n"
-        "3. STRICT LENGTH LIMIT: Each bullet point must be a single, direct sentence, containing a maximum of 18 words.\n"
-        "4. SPEAKER NOTES MANDATORY: For every single slide, you MUST write detailed speaker notes. Format them as `Speaker Notes: <detailed paragraph describing the slide contents, statistics, and business implications in depth>` on a new line after the slide bullets.\n"
-        "5. NO WRAPPER SLIDES: Never write ## Title Page, ## Acknowledgement, or ## Thank You slides.\n"
-        "6. SLIDE COUNT: Ensure the presentation contains between 10 and 14 slides (## headings) in total."
+        "You are an expert PowerPoint presentation designer creating slides from scratch:\n"
+        "1. SLIDE STRUCTURE: Use ## for each slide heading. Each ## becomes exactly one slide.\n"
+        "2. BULLETS: Exactly 3-5 bullet points per slide using '-' syntax.\n"
+        "3. LENGTH: Each bullet = one direct sentence, max 18 words.\n"
+        "4. SPEAKER NOTES: Every slide MUST have: 'Speaker Notes: <detailed paragraph>'\n"
+        "5. NO WRAPPER SLIDES: Never write ## Title Page, ## Acknowledgement, or ## Thank You.\n"
+        "6. SLIDE COUNT: 10-14 slides total.\n"
     ),
- 
+
     "plan": (
-        "You are a document title generator. Your only job is to output a single "
-        "5-7 word professional document title based on the file content and user request provided.\n\n"
-        "Rules:\n"
-        "- Output ONLY the title -- no quotes, no punctuation at the end, no preamble.\n"
-        "- Derive the title from the ACTUAL FILE CONTENT described.\n"
-        "- NEVER produce generic titles like 'HPCL Training Document', 'KPI Dashboard'.\n"
-        "- Only include 'HPCL' if the content is specifically about HPCL operations.\n"
-        "- Use correct casing. Always write 'HPCL', 'HR', 'FY', 'KPI' in full uppercase.\n"
+        "You are a document title generator. Output a single 5-7 word professional document title.\n"
+        "Rules: Output ONLY the title -- no quotes, no punctuation, no preamble.\n"
+        "Derive the title from the ACTUAL FILE CONTENT. Never produce generic titles.\n"
+        "Only include 'HPCL' if the content is specifically about HPCL operations.\n"
+        "Use correct casing: 'HPCL', 'HR', 'FY', 'KPI' in full uppercase.\n"
     ),
 }
- 
+
 _OFFICIAL_DOC_TYPES = {
     "file_note", "office_memorandum", "office_notice",
     "circular", "purchase_note", "office_order"
 }
- 
- 
+
+
 def get_system_prompt(output_type: str, doc_type: str = None, has_files: bool = True) -> str:
+    """
+    Assemble the system prompt for a given output type and document type.
+    Content/grounding rules are appended here; the caller owns user-message content.
+    """
     if output_type == "plan":
         return SYSTEM_PROMPTS["plan"]
- 
+
     if doc_type in _OFFICIAL_DOC_TYPES:
-        return SYSTEM_PROMPTS["official_doc"] + "\n\n" + _BASE_CORE_RULES
- 
+        base = SYSTEM_PROMPTS["official_doc"] + "\n\n" + _CORE_RULES
+        if not has_files:
+            base += "\n\n" + _NOINPUT_DATA_RULES
+        return base
+
     spec_rules = ""
     is_analytical = doc_type in ("business_report", "financial_report", "operational", "analytical")
     if is_analytical:
@@ -762,55 +500,60 @@ def get_system_prompt(output_type: str, doc_type: str = None, has_files: bool = 
         spec_rules = _SOP_SPECIFIC_RULES
 
     if not has_files:
-        key = f"{output_type}_noinput"
-        prompt = SYSTEM_PROMPTS.get(key, SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"]))
-        return prompt + "\n\n" + _CORE_RULES + "\n\n" + spec_rules + "\n\n" + _NOINPUT_DATA_RULES
-        
-    prompt = SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"])
-    rules  = _CORE_RULES + "\n\n" + _BASE_GROUNDING_RULES + "\n\n" + spec_rules
-    
-    if is_analytical:
-        rules += "\n\n" + _ANALYTICAL_RULES
-        
-    rules += "\n\n" + _MULTIFILE_RULES
-    
-    if is_analytical:
-        if output_type in ("docx", "pdf"):
-            chart_instructions = _CHART_COVERAGE_RULES + "\n" + CHART_MARKER_GUIDE
-        elif output_type == "pptx":
-            chart_instructions = (
-                "\n25. For analytical reports, distribute charts across the deck where meaningful numeric data exists.\n"
-                "\n" + CHART_MARKER_GUIDE
+        key  = f"{output_type}_noinput"
+        base = SYSTEM_PROMPTS.get(key, SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"]))
+        return base + "\n\n" + _CORE_RULES + spec_rules + "\n\n" + _NOINPUT_DATA_RULES
+
+    base  = SYSTEM_PROMPTS.get(output_type, SYSTEM_PROMPTS["docx"])
+    rules = _CORE_RULES + "\n\n" + _GROUNDING_RULES + spec_rules + "\n\n" + _MULTIFILE_RULES
+
+    if is_analytical and output_type in ("docx", "pdf"):
+        rules += "\n\n" + _CHART_COVERAGE_RULES + "\n" + CHART_MARKER_GUIDE
+    elif is_analytical and output_type == "pptx":
+        rules += "\n\nFor analytical reports, distribute charts across slides where meaningful numeric data exists.\n"
+
+    return base + "\n\n" + rules
+
+
+def get_doctype_rules(doc_type: str, is_combined: bool = False) -> str:
+    rules = _DOCTYPE_OUTPUT_RULES.get(doc_type, _DOCTYPE_OUTPUT_RULES["informational"])
+    if is_combined and doc_type == "business_report":
+        if "## Risk Assessment" in rules:
+            rules = rules.replace(
+                "## Risk Assessment",
+                "## Cross-File Synthesis & Efficiency Comparisons\n  ## Risk Assessment"
             )
-        else:
-            chart_instructions = ""
-        return prompt + "\n\n" + rules + "\n\n" + chart_instructions
-        
-    return prompt + "\n\n" + rules
- 
- 
-def get_doctype_rules(doc_type: str) -> str:
-    return _DOCTYPE_OUTPUT_RULES.get(doc_type, _DOCTYPE_OUTPUT_RULES["informational"])
- 
- 
+        if "Expected Outcome & Metrics)\n" in rules:
+            rules = rules.replace(
+                "Expected Outcome & Metrics)\n",
+                "Expected Outcome & Metrics)\n  "
+                "## Implementation Roadmap  (Immediate 30d / Short-term 90d / Medium-term 180d)\n"
+            )
+    return rules
+
+
 def get_cross_file_rules() -> str:
     return _CROSS_FILE_RULES
- 
- 
+
+
 def is_official_doc_type(doc_type: str) -> bool:
     return doc_type in _OFFICIAL_DOC_TYPES
 
 
 def _get_max_tokens(doc_type: str, is_combined: bool, output_type: str) -> int:
+    """
+    Choose how many output tokens to request.
+    This is the only place max_tokens is decided -- callers do not override it.
+    """
     if doc_type and doc_type in _OFFICIAL_DOC_TYPES:
-        return 4096   # official docs need full sections
+        return 3500   # official docs need full multi-section content
     if is_combined:
-        return 4096   # integrated report across multiple files
+        return 3500   # integrated multi-file report
     if output_type == "pptx":
-        return 1536   # slides are short
-    return 2048       # single-file digest
- 
- 
+        return 1536   # slides are compact
+    return 2048       # single-file digest or simple document
+
+
 def query_llama(prompt: str, output_type: str = "docx",
                 is_combined: bool = False,
                 has_files: bool = True,
@@ -818,6 +561,19 @@ def query_llama(prompt: str, output_type: str = "docx",
                 doc_type: str = None) -> str:
     """
     Call the Groq LLaMA model with exponential backoff for rate limits.
+
+    Single responsibility: HTTP transport + retry logic.
+
+    What this function does:
+      - Assembles the payload (system prompt + user message).
+      - Chooses max_tokens via _get_max_tokens().
+      - Retries on 429 / 503 with backoff; falls back to FALLBACK_MODEL.
+      - On 413: reduces max_tokens to shrink output reservation and retries.
+        It does NOT trim or alter the prompt -- that is the caller's responsibility.
+
+    The caller (analysis_agent.run_analysis / analysis_agent.run_insight /
+    agent_orchestrator) is responsible for ensuring the prompt already fits
+    within PROMPT_TOKEN_BUDGET before this function is called.
     """
     if system_override:
         system_prompt = system_override
@@ -827,17 +583,19 @@ def query_llama(prompt: str, output_type: str = "docx",
             f"[query_llama] output_type='{output_type}', "
             f"doc_type='{doc_type}', has_files={has_files}"
         )
- 
+
     max_tokens = _get_max_tokens(doc_type, is_combined, output_type)
- 
+
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type":  "application/json",
     }
- 
+
     models_to_try = [MODEL_NAME, FALLBACK_MODEL]
- 
+
     for model in models_to_try:
+        current_max_tokens = max_tokens   # may be halved on 413 within this model's attempts
+
         for attempt in range(4):
             try:
                 payload = {
@@ -847,95 +605,84 @@ def query_llama(prompt: str, output_type: str = "docx",
                         {"role": "user",   "content": prompt},
                     ],
                     "temperature": 0.4,
-                    "max_tokens":  max_tokens,
+                    "max_tokens":  current_max_tokens,
                 }
- 
+
                 logging.info(
                     f"Groq call: model={model}, attempt={attempt + 1}, "
                     f"output_type={output_type}, doc_type={doc_type}, "
-                    f"max_tokens={max_tokens}"
+                    f"max_tokens={current_max_tokens}, "
+                    f"prompt_chars={len(prompt)}"
                 )
- 
+
                 response = requests.post(
                     GROQ_API_URL,
                     headers=headers,
                     json=payload,
                     timeout=90,
                 )
- 
-                # ── 413 Payload Too Large ───────────────────────────────────
+
+                # ── 413 Payload Too Large ─────────────────────────────────
+                # Only reduce max_tokens -- do NOT alter the prompt.
+                # If reducing max_tokens doesn't help, escalate to next model.
+                # Log a clear message so the caller knows to reduce prompt size.
                 if response.status_code == 413:
-                    logging.error(f"Groq API 413 Response content: {response.text}")
-                    if max_tokens > 512:
-                        new_max = max(512, max_tokens // 2)
-                        logging.warning(
-                            f"Payload too large (413) on {model}. "
-                            f"Reducing max_tokens {max_tokens} -> {new_max}."
-                        )
-                        max_tokens = new_max
+                    logging.error(
+                        f"Groq API 413 on {model} attempt {attempt + 1}. "
+                        f"prompt_chars={len(prompt)}, max_tokens={current_max_tokens}. "
+                        f"Reducing max_tokens. If this persists, reduce prompt size in caller."
+                    )
+                    if current_max_tokens > 512:
+                        current_max_tokens = max(512, current_max_tokens // 2)
                         time.sleep(2)
                         continue
                     else:
                         logging.error(
-                            f"Payload too large (413) on {model} even at "
-                            f"min max_tokens. Trying next model."
+                            f"413 on {model} even at min max_tokens={current_max_tokens}. "
+                            f"Trying next model. Caller must reduce prompt size."
                         )
                         break
 
-                # ── 429 Rate Limit -- FIXED: exponential backoff ─────────
+                # ── 429 Rate Limit ────────────────────────────────────────
                 if response.status_code == 429:
-                    # Try to read Retry-After from headers first
                     retry_after = (
                         response.headers.get("Retry-After")
                         or response.headers.get("x-ratelimit-reset-requests")
                         or response.headers.get("x-ratelimit-reset")
                     )
-
-                    # Try to parse it
                     server_wait = None
                     if retry_after:
                         try:
-                            raw = str(retry_after)
+                            raw  = str(retry_after)
                             nums = re.findall(r"\d+\.?\d*", raw)
                             if nums:
                                 val = float(nums[0])
-                                # Convert ms to seconds if needed
                                 if "ms" in raw.lower():
                                     val = val / 1000.0
                                 server_wait = val
                         except Exception:
                             pass
 
-                    # Exponential backoff: 15s, 30s, 60s, 90s
-                    # Add jitter to avoid thundering herd
                     base_wait = min(15 * (2 ** attempt), 90)
                     jitter    = random.uniform(0, 5)
                     wait      = max(server_wait or 0, base_wait) + jitter
 
-                    # If this is not the last model, and wait time is too long (> 15 seconds), fallback immediately
                     if model != models_to_try[-1] and wait > 15:
                         logging.warning(
-                            f"Rate limited (429) on {model}. Wait time {wait:.1f}s is too long. "
-                            f"Switching to fallback model immediately."
+                            f"Rate limited (429) on {model}. "
+                            f"Wait {wait:.1f}s too long -- switching to fallback model."
                         )
                         break
 
-                    # Cap the sleep time to a maximum of 30 seconds to prevent long UI hangs
-                    if wait > 30:
-                        logging.warning(
-                            f"Capping rate limit sleep duration from {wait:.1f}s to 30.0s."
-                        )
-                        wait = 30.0
-
+                    wait = min(wait, 90.0)
                     logging.warning(
                         f"Rate limited (429) on {model}, attempt {attempt + 1}. "
-                        f"server_wait={server_wait}, computed_wait={wait:.1f}s. "
-                        f"Sleeping..."
+                        f"server_wait={server_wait}, computed_wait={wait:.1f}s. Sleeping..."
                     )
                     time.sleep(wait)
                     continue
 
-                # ── 503 Service Unavailable ──────────────────────────────
+                # ── 503 Service Unavailable ───────────────────────────────
                 if response.status_code == 503:
                     wait = 10 * (attempt + 1) + random.uniform(0, 3)
                     logging.warning(
@@ -944,10 +691,10 @@ def query_llama(prompt: str, output_type: str = "docx",
                     )
                     time.sleep(wait)
                     continue
- 
+
                 response.raise_for_status()
                 result = response.json()["choices"][0]["message"]["content"].strip()
-                
+
                 min_len = 10 if output_type == "plan" else 50
                 if not result or len(result) < min_len:
                     logging.warning(
@@ -956,37 +703,30 @@ def query_llama(prompt: str, output_type: str = "docx",
                     )
                     time.sleep(5)
                     continue
-                    
+
                 logging.info(f"Groq response: {len(result)} chars from {model}")
                 return result
- 
+
             except requests.exceptions.Timeout:
-                logging.warning(
-                    f"Timeout on {model} attempt {attempt + 1}. Retrying."
-                )
+                logging.warning(f"Timeout on {model} attempt {attempt + 1}. Retrying.")
                 time.sleep(8)
- 
+
             except requests.exceptions.ConnectionError:
-                logging.warning(
-                    f"Connection error on {model} attempt {attempt + 1}. Retrying."
-                )
+                logging.warning(f"Connection error on {model} attempt {attempt + 1}. Retrying.")
                 time.sleep(8)
- 
+
             except requests.exceptions.HTTPError as e:
-                logging.warning(
-                    f"HTTP error on {model} attempt {attempt + 1}: {e}"
-                )
+                logging.warning(f"HTTP error on {model} attempt {attempt + 1}: {e}")
                 time.sleep(5)
- 
+
             except Exception as e:
-                logging.warning(
-                    f"Unexpected error on {model} attempt {attempt + 1}: {e}"
-                )
+                logging.warning(f"Unexpected error on {model} attempt {attempt + 1}: {e}")
                 time.sleep(5)
- 
+
         logging.warning(f"All attempts failed for {model}, trying next model.")
- 
+
     raise Exception(
         "Groq API failed after all retries on all models. "
         "Check logs for rate limit or connectivity details."
     )
+
